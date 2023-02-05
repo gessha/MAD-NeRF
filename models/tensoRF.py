@@ -1,5 +1,5 @@
 from .tensorBase import *
-
+import torch.nn as nn
 
 class TensorVM(TensorBase):
     def __init__(self, aabb, gridSize, device, **kargs):
@@ -432,3 +432,172 @@ class TensorCP(TensorBase):
         for idx in range(len(self.app_line)):
             total = total + reg(self.app_line[idx]) * 1e-3
         return total
+
+# Audio feature extractor
+class AudioAttNet(nn.Module):
+    def __init__(self, dim_aud=32, seq_len=8):
+        super(AudioAttNet, self).__init__()
+        self.seq_len = seq_len
+        self.dim_aud = dim_aud
+        self.attentionConvNet = nn.Sequential(  # b x subspace_dim x seq_len
+            nn.Conv1d(self.dim_aud, 16, kernel_size=3,
+                      stride=1, padding=1, bias=True),
+            nn.LeakyReLU(0.02, True),
+            nn.Conv1d(16, 8, kernel_size=3, stride=1, padding=1, bias=True),
+            nn.LeakyReLU(0.02, True),
+            nn.Conv1d(8, 4, kernel_size=3, stride=1, padding=1, bias=True),
+            nn.LeakyReLU(0.02, True),
+            nn.Conv1d(4, 2, kernel_size=3, stride=1, padding=1, bias=True),
+            nn.LeakyReLU(0.02, True),
+            nn.Conv1d(2, 1, kernel_size=3, stride=1, padding=1, bias=True),
+            nn.LeakyReLU(0.02, True)
+        )
+        self.attentionNet = nn.Sequential(
+            nn.Linear(in_features=self.seq_len,
+                      out_features=self.seq_len, bias=True),
+            nn.Softmax(dim=1)
+        )
+
+    def forward(self, x):
+        y = x[..., :self.dim_aud].permute(1, 0).unsqueeze(
+            0)  # 2 x subspace_dim x seq_len
+        y = self.attentionConvNet(y)
+        y = self.attentionNet(y.view(1, self.seq_len)).view(self.seq_len, 1)
+        # print(y.view(-1).data)
+        return torch.sum(y*x, dim=0)
+# Audio feature extractor
+class AudioNet(nn.Module):
+    def __init__(self, dim_aud=76, win_size=16):
+        super(AudioNet, self).__init__()
+        self.win_size = win_size
+        self.dim_aud = dim_aud
+        self.encoder_conv = nn.Sequential(  # n x 29 x 16
+            nn.Conv1d(29, 32, kernel_size=3, stride=2,
+                      padding=1, bias=True),  # n x 32 x 8
+            nn.LeakyReLU(0.02, True),
+            nn.Conv1d(32, 32, kernel_size=3, stride=2,
+                      padding=1, bias=True),  # n x 32 x 4
+            nn.LeakyReLU(0.02, True),
+            nn.Conv1d(32, 64, kernel_size=3, stride=2,
+                      padding=1, bias=True),  # n x 64 x 2
+            nn.LeakyReLU(0.02, True),
+            nn.Conv1d(64, 64, kernel_size=3, stride=2,
+                      padding=1, bias=True),  # n x 64 x 1
+            nn.LeakyReLU(0.02, True),
+        )
+        self.encoder_fc1 = nn.Sequential(
+            nn.Linear(64, 64),
+            nn.LeakyReLU(0.02, True),
+            nn.Linear(64, dim_aud),
+        )
+
+    def forward(self, x):
+        half_w = int(self.win_size/2)
+        x = x[:, 8-half_w:8+half_w, :].permute(0, 2, 1)
+        x = self.encoder_conv(x).squeeze(-1)
+        x = self.encoder_fc1(x).squeeze()
+        return x
+# New Audio Driven NeRF, TensorCP version
+class AD_TensorCP(TensorCP):
+    def __init__(self, aabb, gridSize, device, audio_dimension, window_size, **kargs):
+        self.audio_dimension = audio_dimension
+        super(TensorCP, self).__init__(aabb, gridSize, device, **kargs)
+        self.audio_net = AudioNet(audio_dimension, window_size).to(device)
+        
+    def compute_audio_feature(self, audio_tensor):
+        return self.audio_net(audio_tensor)
+    
+    # def compute_appfeature(self, xyz_sampled):
+
+    #     coordinate_line = torch.stack((xyz_sampled[..., self.vecMode[0]], xyz_sampled[..., self.vecMode[1]], xyz_sampled[..., self.vecMode[2]]))
+    #     coordinate_line = torch.stack((torch.zeros_like(coordinate_line), coordinate_line), dim=-1).detach().view(3, -1, 1, 2)
+
+    #     line_coef_point = F.grid_sample(self.app_line[0], coordinate_line[[0]],align_corners=True).view(-1, *xyz_sampled.shape[:1])
+    #     line_coef_point = line_coef_point * F.grid_sample(self.app_line[1], coordinate_line[[1]],align_corners=True).view(-1, *xyz_sampled.shape[:1])
+    #     line_coef_point = line_coef_point * F.grid_sample(self.app_line[2], coordinate_line[[2]],align_corners=True).view(-1, *xyz_sampled.shape[:1])
+        
+    #     return self.basis_mat(line_coef_point.T)
+    
+    def init_render_func(self, shadingMode, pos_pe, view_pe, fea_pe, featureC, device):
+        if shadingMode == 'MLP_PE':
+            self.renderModule = MLPRender_PE(self.app_dim+self.audio_dimension, view_pe, pos_pe, featureC).to(device)
+        elif shadingMode == 'MLP_Fea':
+            self.renderModule = MLPRender_Fea(self.app_dim+self.audio_dimension, view_pe, fea_pe, featureC).to(device)
+        elif shadingMode == 'MLP':
+            self.renderModule = MLPRender(self.app_dim+self.audio_dimension, view_pe, featureC).to(device)
+        elif shadingMode == 'SH':
+            self.renderModule = SHRender
+        elif shadingMode == 'RGB':
+            assert self.app_dim == 3
+            self.renderModule = RGBRender
+        else:
+            print("Unrecognized shading module")
+            exit()
+        print("pos_pe", pos_pe, "view_pe", view_pe, "fea_pe", fea_pe)
+        print(self.renderModule)
+
+    def forward(self, rays_chunk, audio_inputs, white_bg=True, is_train=False, ndc_ray=False, N_samples=-1):
+
+        # sample points
+        viewdirs = rays_chunk[:, 3:6]
+        if ndc_ray:
+            xyz_sampled, z_vals, ray_valid = self.sample_ray_ndc(rays_chunk[:, :3], viewdirs, is_train=is_train,N_samples=N_samples)
+            dists = torch.cat((z_vals[:, 1:] - z_vals[:, :-1], torch.zeros_like(z_vals[:, :1])), dim=-1)
+            rays_norm = torch.norm(viewdirs, dim=-1, keepdim=True)
+            dists = dists * rays_norm
+            viewdirs = viewdirs / rays_norm
+        else:
+            xyz_sampled, z_vals, ray_valid = self.sample_ray(rays_chunk[:, :3], viewdirs, is_train=is_train,N_samples=N_samples)
+            dists = torch.cat((z_vals[:, 1:] - z_vals[:, :-1], torch.zeros_like(z_vals[:, :1])), dim=-1)
+        viewdirs = viewdirs.view(-1, 1, 3).expand(xyz_sampled.shape)
+        
+        if self.alphaMask is not None:
+            alphas = self.alphaMask.sample_alpha(xyz_sampled[ray_valid])
+            alpha_mask = alphas > 0
+            ray_invalid = ~ray_valid
+            ray_invalid[ray_valid] |= (~alpha_mask)
+            ray_valid = ~ray_invalid
+
+
+        sigma = torch.zeros(xyz_sampled.shape[:-1], device=xyz_sampled.device)
+        rgb = torch.zeros((*xyz_sampled.shape[:2], 3), device=xyz_sampled.device)
+
+        if ray_valid.any():
+            xyz_sampled = self.normalize_coord(xyz_sampled)
+            sigma_feature = self.compute_densityfeature(xyz_sampled[ray_valid])
+
+            validsigma = self.feature2density(sigma_feature)
+            sigma[ray_valid] = validsigma
+
+
+        alpha, weight, bg_weight = raw2alpha(sigma, dists * self.distance_scale)
+
+        app_mask = weight > self.rayMarch_weight_thres
+
+        if app_mask.any():
+            app_features = self.compute_appfeature(xyz_sampled[app_mask])
+            audio_features = self.compute_audio_feature(audio_inputs)
+            
+            # print(xyz_sampled[app_mask].shape, audio_inputs.shape, app_features.shape, audio_features.shape)
+            batch_size, _ = app_features.shape
+            audio_feature_size = audio_features.shape[0]
+            audio_features = audio_features.broadcast_to([batch_size, audio_feature_size])
+            
+            composite_features = torch.cat([app_features, audio_features], dim=1)
+            valid_rgbs = self.renderModule(xyz_sampled[app_mask], viewdirs[app_mask], composite_features)
+            rgb[app_mask] = valid_rgbs
+
+        acc_map = torch.sum(weight, -1)
+        rgb_map = torch.sum(weight[..., None] * rgb, -2)
+
+        if white_bg or (is_train and torch.rand((1,))<0.5):
+            rgb_map = rgb_map + (1. - acc_map[..., None])
+
+        
+        rgb_map = rgb_map.clamp(0,1)
+
+        with torch.no_grad():
+            depth_map = torch.sum(weight * z_vals, -1)
+            depth_map = depth_map + (1. - acc_map) * rays_chunk[..., -1]
+
+        return rgb_map, depth_map # rgb, sigma, alpha, weight, bg_weight

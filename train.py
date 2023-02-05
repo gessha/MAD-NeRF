@@ -18,8 +18,8 @@ import sys
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-renderer = OctreeRender_trilinear_fast
-
+# renderer = OctreeRender_trilinear_fast
+renderer = OctreeRender_trilinear_fast_AUDIO
 
 class SimpleSampler:
     def __init__(self, total, batch):
@@ -91,7 +91,7 @@ def reconstruction(args):
     # init dataset
     dataset = dataset_dict[args.dataset_name]
     train_dataset = dataset(args.datadir, split='train', downsample=args.downsample_train, is_stack=False)
-    test_dataset = dataset(args.datadir, split='test', downsample=args.downsample_train, is_stack=True)
+    test_dataset = dataset(args.datadir, split='val', downsample=args.downsample_train, is_stack=True)
     white_bg = train_dataset.white_bg
     near_far = train_dataset.near_far
     ndc_ray = args.ndc_ray
@@ -132,7 +132,7 @@ def reconstruction(args):
         tensorf = eval(args.model_name)(**kwargs)
         tensorf.load(ckpt)
     else:
-        tensorf = eval(args.model_name)(aabb, reso_cur, device,
+        tensorf = eval(args.model_name)(aabb, reso_cur, device, audio_dimension=args.audio_dimension, window_size=args.window_size,
                     density_n_comp=n_lamb_sigma, appearance_n_comp=n_lamb_sh, app_dim=args.data_dim_color, near_far=near_far,
                     shadingMode=args.shadingMode, alphaMask_thres=args.alpha_mask_thre, density_shift=args.density_shift, distance_scale=args.distance_scale,
                     pos_pe=args.pos_pe, view_pe=args.view_pe, fea_pe=args.fea_pe, featureC=args.featureC, step_ratio=args.step_ratio, fea2denseAct=args.fea2denseAct)
@@ -157,10 +157,10 @@ def reconstruction(args):
     torch.cuda.empty_cache()
     PSNRs,PSNRs_test = [],[0]
 
-    allrays, allrgbs = train_dataset.all_rays, train_dataset.all_rgbs
-    if not args.ndc_ray:
-        allrays, allrgbs = tensorf.filtering_rays(allrays, allrgbs, bbox_only=True)
-    trainingSampler = SimpleSampler(allrays.shape[0], args.batch_size)
+    # allrays, allrgbs = train_dataset.all_rays, train_dataset.all_rgbs
+    # if not args.ndc_ray:
+    #     allrays, allrgbs = tensorf.filtering_rays(allrays, allrgbs, bbox_only=True)
+    # trainingSampler = SimpleSampler(allrays.shape[0], args.batch_size)
 
     Ortho_reg_weight = args.Ortho_weight
     print("initial Ortho_reg_weight", Ortho_reg_weight)
@@ -175,12 +175,15 @@ def reconstruction(args):
     pbar = tqdm(range(args.n_iters), miniters=args.progress_refresh_rate, file=sys.stdout)
     for iteration in pbar:
 
-
-        ray_idx = trainingSampler.nextids()
-        rays_train, rgb_train = allrays[ray_idx], allrgbs[ray_idx].to(device)
+        # ray_idx = trainingSampler.nextids()
+        dataset_index = iteration % len(train_dataset)
+        dataset_item = train_dataset[dataset_index]
+        # rays_train, rgb_train, aud_train = train_dataset[dataset_index]
+        rays_train, rgb_train, aud_train = dataset_item['rays'].to(device), dataset_item['rgbs'].to(device), dataset_item['auds'].to(device)
+        # rays_train, rgb_train = allrays[ray_idx], allrgbs[ray_idx].to(device)
 
         #rgb_map, alphas_map, depth_map, weights, uncertainty
-        rgb_map, alphas_map, depth_map, weights, uncertainty = renderer(rays_train, tensorf, chunk=args.batch_size,
+        rgb_map, alphas_map, depth_map, weights, uncertainty = renderer(rays_train, aud_train, tensorf, chunk=args.batch_size,
                                 N_samples=nSamples, white_bg = white_bg, ndc_ray=ndc_ray, device=device, is_train=True)
 
         loss = torch.mean((rgb_map - rgb_train) ** 2)
@@ -252,10 +255,10 @@ def reconstruction(args):
                 print("continuing L1_reg_weight", L1_reg_weight)
 
 
-            if not args.ndc_ray and iteration == update_AlphaMask_list[1]:
+            # if not args.ndc_ray and iteration == update_AlphaMask_list[1]:
                 # filter rays outside the bbox
-                allrays,allrgbs = tensorf.filtering_rays(allrays,allrgbs)
-                trainingSampler = SimpleSampler(allrgbs.shape[0], args.batch_size)
+                # allrays,allrgbs = tensorf.filtering_rays(allrays,allrgbs)
+                # trainingSampler = SimpleSampler(allrgbs.shape[0], args.batch_size)
 
 
         if iteration in upsamp_list:
@@ -279,13 +282,13 @@ def reconstruction(args):
     if args.render_train:
         os.makedirs(f'{logfolder}/imgs_train_all', exist_ok=True)
         train_dataset = dataset(args.datadir, split='train', downsample=args.downsample_train, is_stack=True)
-        PSNRs_test = evaluation(train_dataset,tensorf, args, renderer, f'{logfolder}/imgs_train_all/',
+        PSNRs_test = evaluation(train_dataset, tensorf, args, renderer, f'{logfolder}/imgs_train_all/',
                                 N_vis=-1, N_samples=-1, white_bg = white_bg, ndc_ray=ndc_ray,device=device)
         print(f'======> {args.expname} test all psnr: {np.mean(PSNRs_test)} <========================')
 
     if args.render_test:
         os.makedirs(f'{logfolder}/imgs_test_all', exist_ok=True)
-        PSNRs_test = evaluation(test_dataset,tensorf, args, renderer, f'{logfolder}/imgs_test_all/',
+        PSNRs_test = evaluation(test_dataset, tensorf, args, renderer, f'{logfolder}/imgs_test_all/',
                                 N_vis=-1, N_samples=-1, white_bg = white_bg, ndc_ray=ndc_ray,device=device)
         summary_writer.add_scalar('test/psnr_all', np.mean(PSNRs_test), global_step=iteration)
         print(f'======> {args.expname} test all psnr: {np.mean(PSNRs_test)} <========================')

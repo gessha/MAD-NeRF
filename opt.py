@@ -20,14 +20,14 @@ def config_parser(cmd=None):
     parser.add_argument('--downsample_test', type=float, default=1.0)
 
     parser.add_argument('--model_name', type=str, default='TensorVMSplit',
-                        choices=['TensorVMSplit', 'TensorCP'])
+                        choices=['TensorVMSplit', 'TensorCP', 'AD_TensorCP'])
 
     # loader options
     parser.add_argument("--batch_size", type=int, default=4096)
     parser.add_argument("--n_iters", type=int, default=30000)
 
     parser.add_argument('--dataset_name', type=str, default='blender',
-                        choices=['blender', 'llff', 'nsvf', 'dtu','tankstemple', 'own_data'])
+                        choices=['blender', 'llff', 'nsvf', 'dtu','tankstemple', 'ad_nerf', 'own_data'])
 
 
     # training options
@@ -69,7 +69,9 @@ def config_parser(cmd=None):
                         help='scaling sampling distance for computation')
     parser.add_argument("--density_shift", type=float, default=-10,
                         help='shift density in softplus; making density = 0  when feature == 0')
-                        
+    parser.add_argument("--audio-dimension", type=int, default=64, help="dimension of audio features added to the MLP")
+    parser.add_argument("--window-size", type=int, default=16, help="audio window size")
+
     # network decoder
     parser.add_argument("--shadingMode", type=str, default="MLP_PE",
                         help='which shading mode to use')

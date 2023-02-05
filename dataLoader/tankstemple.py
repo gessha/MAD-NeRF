@@ -6,7 +6,9 @@ from PIL import Image
 from torchvision import transforms as T
 
 from .ray_utils import *
-
+import random
+import json
+from pathlib import Path
 
 def circle(radius=3.5, h=0.0, axis='z', t0=0, r=1):
     if axis == 'z':
@@ -213,4 +215,203 @@ class TanksTempleDataset(Dataset):
 
             sample = {'rays': rays,
                       'rgbs': img}
+        return sample
+
+class TanksTempleDataset_AUDIO(Dataset):
+    """NSVF Generic Dataset."""
+    def __init__(self, datadir, split='train', downsample=1.0, wh=[450,450], is_stack=False, seed=1337, adnerf=True, testskip=1, per_image_loading=True, ray_sample_rate=4096):
+        self.root_dir = datadir
+        self.split = split
+        self.is_stack = is_stack
+        self.downsample = downsample
+        self.img_wh = (int(wh[0]/downsample),int(wh[1]/downsample))
+        self.define_transforms()
+        self.adnerf = adnerf
+        self.testskip = testskip
+        self.per_image_loading = per_image_loading
+        self.ray_sample_rate = ray_sample_rate
+        random.seed(seed)
+        
+        self.white_bg = True
+        self.near_far = [0.01,6.0]
+        self.scene_bbox = torch.from_numpy(np.loadtxt(f'{self.root_dir}/bbox.txt')).float()[:6].view(2,3) # *1.2 # COMMENTED OUT, DONE IN REGULAR TANKS TEMPLE DATASET
+        self.blender2opencv = np.array([[1, 0, 0, 0], [0, -1, 0, 0], [0, 0, -1, 0], [0, 0, 0, 1]])
+        
+        if self.adnerf:
+            self.read_meta_ADNERF()
+        else:
+            self.read_meta()
+        self.define_proj_mat()
+        
+        self.center = torch.mean(self.scene_bbox, axis=0).float().view(1, 1, 3)
+        self.radius = (self.scene_bbox[1] - self.center).float().view(1, 1, 3)
+    
+    def bbox2corners(self):
+        corners = self.scene_bbox.unsqueeze(0).repeat(4,1,1)
+        for i in range(3):
+            corners[i,[0,1],i] = corners[i,[1,0],i] 
+        return corners.view(-1,3)
+        
+    ###
+    # AD-NeRF modification
+    ### 
+    def read_meta_ADNERF(self):
+        
+        if self.split == "train":
+            data = json.loads((Path(self.root_dir) / "transforms_train.json").read_text())
+        if self.split == "val":
+            data = json.loads((Path(self.root_dir) / "transforms_val.json").read_text())
+        
+        aud_features = np.load(Path(self.root_dir) / 'aud.npy')
+        
+        self.intrinsics = np.zeros((4,4))
+        self.intrinsics[0, 0] = data['focal_len']
+        self.intrinsics[1, 1] = data['focal_len']
+        self.intrinsics[0, 2] = data["cx"] 
+        self.intrinsics[1, 2] = data["cy"]
+        self.intrinsics[2, 2] = 1
+        self.intrinsics[3, 3] = 1
+        
+         # ray directions for all pixels, same for all images (same H, W, focal)
+        self.directions = get_ray_directions(self.img_wh[1], self.img_wh[0], [self.intrinsics[0,0],self.intrinsics[1,1]], center=self.intrinsics[:2,2])  # (h, w, 3)
+        self.directions = self.directions / torch.norm(self.directions, dim=-1, keepdim=True)
+        
+        # img_files = sorted((Path(self.root_dir) / "head_imgs").glob("*.jpg"))
+        # assert len(img_files) == len(data['frames']), f"{len(img_files)} != {len(data['frames'])}"
+        
+        self.poses = []
+        self.all_rays = []
+        self.all_rgbs = []
+        self.auds = []
+        
+        if self.split == 'train' or self.testskip == 0:
+            skip = 1
+        else:
+            skip = self.testskip
+        
+        for frame in tqdm(data['frames'][::skip], desc=f'Loading data {self.split} ({len(data["frames"][::skip])})'):
+            # load image
+            image_path = Path(self.root_dir) / "head_imgs" / f"{frame['img_id']}.jpg"
+            img = Image.open(image_path)
+            if self.downsample!=1.0:
+                img = img.resize(self.img_wh, Image.LANCZOS)
+            img = self.transform(img)  # (4, h, w)
+            img = img.view(img.shape[0], -1).permute(1, 0)  # (h*w, 4) RGBA
+            if img.shape[-1]==4:
+                img = img[:, :3] * img[:, -1:] + (1 - img[:, -1:])  # blend A to RGB
+            self.all_rgbs.append(img)
+            # print("Loaded images")
+            
+            # add transformation
+            c2w = np.array(frame['transform_matrix'])# @ cam_trans
+            c2w = torch.FloatTensor(c2w)
+            self.poses.append(c2w)
+            # print("Loaded pose")
+            
+            # add the rays
+            rays_o, rays_d = get_rays(self.directions, c2w)  # both (h*w, 3)
+            self.all_rays += [torch.cat([rays_o, rays_d], 1)]  # (h*w, 8)
+            # print("Loaded rays")
+            
+            # add audio
+            self.auds.append(self.transform(aud_features[min(frame['aud_id'], aud_features.shape[0]-1)]))
+            # print("Loaded audio")
+
+        self.rays_per_image = len(rays_o)
+        self.poses = torch.stack(self.poses)
+
+        # print(f"Beep {0}")
+        center = torch.mean(self.scene_bbox, dim=0)
+        # print(f"Beep {1}")
+        radius = torch.norm(self.scene_bbox[1]-center)*1.2
+        # print(f"Beep {2}")
+        up = torch.mean(self.poses[:, :3, 1], dim=0).tolist()
+        # print(f"Beep {3}")
+        pos_gen = circle(radius=radius, h=-0.2*up[1], axis='y')
+        # print(f"Beep {4}")
+        self.render_path = gen_path(pos_gen, up=up,frames=200)
+        # print(f"Beep {5}")
+        self.render_path[:, :3, 3] += center
+        # print(f"Beep {6}")
+
+        ### Old way of stacking data
+        # if 'train' == self.split:
+        #     if self.is_stack:
+        #         self.all_rays = torch.stack(self.all_rays, 0).reshape(-1,*self.img_wh[::-1], 6)  # (len(self.meta['frames])*h*w, 3)
+        #         self.all_rgbs = torch.stack(self.all_rgbs, 0).reshape(-1,*self.img_wh[::-1], 3)  # (len(self.meta['frames])*h*w, 3) 
+        #     else:
+        #         self.all_rays = torch.cat(self.all_rays, 0)  # (len(self.meta['frames])*h*w, 3)
+        #         self.all_rgbs = torch.cat(self.all_rgbs, 0)  # (len(self.meta['frames])*h*w, 3)
+        # else:
+        #     self.all_rays = torch.stack(self.all_rays, 0)  # (len(self.meta['frames]),h*w, 3)
+        #     self.all_rgbs = torch.stack(self.all_rgbs, 0).reshape(-1,*self.img_wh[::-1], 3)  # (len(self.meta['frames]),h,w,3)        
+        
+        ### NEW WAY of stacking data
+        self.all_rays = torch.stack(self.all_rays, 0)  # (len(self.meta['frames]),h*w, 3)
+        self.all_rgbs = torch.stack(self.all_rgbs, 0).reshape(-1,*self.img_wh[::-1], 3)  # (len(self.meta['frames])*h*w, 3)
+        
+        ###
+        # AD-NeRF modification END
+        ### 
+ 
+    def define_transforms(self):
+        self.transform = T.ToTensor()
+        
+    def define_proj_mat(self):
+        self.proj_mat = torch.from_numpy(self.intrinsics[:3,:3]).unsqueeze(0).float() @ torch.inverse(self.poses)[:,:3]
+
+    def world2ndc(self, points):
+        device = points.device
+        return (points - self.center.to(device)) / self.radius.to(device)
+        
+    def __len__(self):
+        if self.split == 'train':
+            if self.per_image_loading:
+                return len(self.all_rgbs)
+            else:
+                return len(self.all_rays)
+        else:
+            if self.per_image_loading:
+                return len(self.all_rgbs)
+            else:
+                return len(self.all_rgbs)        
+    
+    def __getitem__(self, idx):
+
+        if self.split == 'train':  # use data in the buffers
+            if self.per_image_loading:
+                rays = self.all_rays[idx]
+                img = self.all_rgbs[idx]
+                auds = self.auds[idx].float()
+                
+                indeces = random.sample(range(rays.shape[0]), self.ray_sample_rate)
+                indeces = torch.Tensor(indeces).to(torch.int32)
+                
+                batch_rays = torch.index_select(rays, 0, indeces) 
+                batch_rgbs = img.reshape(rays.shape[0], 3)
+                batch_rgbs = torch.index_select(batch_rgbs, 0, indeces)
+                
+                sample = {
+                    'rays': batch_rays,
+                    "rgbs": batch_rgbs,
+                    "auds": auds,
+                }
+
+            else:
+                sample = {
+                    'rays': self.all_rays[idx],
+                    'rgbs': self.all_rgbs[idx]
+                }
+
+        else:  
+            # create data for each image separately
+            rays = self.all_rays[idx]
+            img = self.all_rgbs[idx]
+            auds = self.auds[idx].float()
+            
+            sample = {
+                'rays': rays,
+                'rgbs': img,
+                'auds': auds
+            }
         return sample

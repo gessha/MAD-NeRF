@@ -1,10 +1,22 @@
 import torch,os,imageio,sys
 from tqdm.auto import tqdm
 from dataLoader.ray_utils import get_rays
-from models.tensoRF import TensorVM, TensorCP, raw2alpha, TensorVMSplit, AlphaGridMask
+from models.tensoRF import TensorVM, TensorCP, raw2alpha, TensorVMSplit, AlphaGridMask, AD_TensorCP
 from utils import *
 from dataLoader.ray_utils import ndc_rays_blender
 
+def OctreeRender_trilinear_fast_AUDIO(rays, audio_inputs, tensorf, chunk=4096, N_samples=-1, ndc_ray=False, white_bg=True, is_train=False, device='cuda'):
+
+    rgbs, alphas, depth_maps, weights, uncertainties = [], [], [], [], []
+    N_rays_all = rays.shape[0]
+    for chunk_idx in range(N_rays_all // chunk + int(N_rays_all % chunk > 0)):
+        rays_chunk = rays[chunk_idx * chunk:(chunk_idx + 1) * chunk].to(device)
+        rgb_map, depth_map = tensorf(rays_chunk, audio_inputs, is_train=is_train, white_bg=white_bg, ndc_ray=ndc_ray, N_samples=N_samples)
+        rgbs.append(rgb_map)
+        depth_maps.append(depth_map)
+        # print(chunk_idx, rays_chunk.shape, rgb_map.shape, depth_map.shape, len(rgbs), len(depth_maps))
+
+    return torch.cat(rgbs), None, torch.cat(depth_maps), None, None
 
 def OctreeRender_trilinear_fast(rays, tensorf, chunk=4096, N_samples=-1, ndc_ray=False, white_bg=True, is_train=False, device='cuda'):
 
@@ -21,7 +33,7 @@ def OctreeRender_trilinear_fast(rays, tensorf, chunk=4096, N_samples=-1, ndc_ray
     return torch.cat(rgbs), None, torch.cat(depth_maps), None, None
 
 @torch.no_grad()
-def evaluation(test_dataset,tensorf, args, renderer, savePath=None, N_vis=5, prtx='', N_samples=-1,
+def evaluation(test_dataset, tensorf, args, renderer, savePath=None, N_vis=5, prtx='', N_samples=-1,
                white_bg=False, ndc_ray=False, compute_extra_metrics=True, device='cuda'):
     PSNRs, rgb_maps, depth_maps = [], [], []
     ssims,l_alex,l_vgg=[],[],[]
@@ -34,14 +46,17 @@ def evaluation(test_dataset,tensorf, args, renderer, savePath=None, N_vis=5, prt
         pass
 
     near_far = test_dataset.near_far
-    img_eval_interval = 1 if N_vis < 0 else max(test_dataset.all_rays.shape[0] // N_vis,1)
-    idxs = list(range(0, test_dataset.all_rays.shape[0], img_eval_interval))
-    for idx, samples in tqdm(enumerate(test_dataset.all_rays[0::img_eval_interval]), file=sys.stdout):
+    # img_eval_interval = 1 if N_vis < 0 else max(test_dataset.all_rays.shape[0] // N_vis,1)
+    # idxs = list(range(0, test_dataset.all_rays.shape[0], img_eval_interval))
+    # for idx, samples in tqdm(enumerate(test_dataset.all_rays[0::img_eval_interval]), file=sys.stdout):
+    for idx, dataset_item in tqdm(enumerate(test_dataset), total=len(test_dataset) ,file=sys.stdout):
 
         W, H = test_dataset.img_wh
-        rays = samples.view(-1,samples.shape[-1])
-
-        rgb_map, _, depth_map, _, _ = renderer(rays, tensorf, chunk=4096, N_samples=N_samples,
+        rays = dataset_item['rays'].to(device)
+        gt_rgb = dataset_item['rgbs']
+        auds = dataset_item['auds'].to(device)
+        # print(tensorf.aabb.device, rays.device, auds.device)
+        rgb_map, _, depth_map, _, _ = renderer(rays, auds, tensorf, chunk=4096, N_samples=N_samples,
                                         ndc_ray=ndc_ray, white_bg = white_bg, device=device)
         rgb_map = rgb_map.clamp(0.0, 1.0)
 
@@ -49,7 +64,7 @@ def evaluation(test_dataset,tensorf, args, renderer, savePath=None, N_vis=5, prt
 
         depth_map, _ = visualize_depth_numpy(depth_map.numpy(),near_far)
         if len(test_dataset.all_rgbs):
-            gt_rgb = test_dataset.all_rgbs[idxs[idx]].view(H, W, 3)
+            # gt_rgb = test_dataset.all_rgbs[idxs[idx]].view(H, W, 3)
             loss = torch.mean((rgb_map - gt_rgb) ** 2)
             PSNRs.append(-10.0 * np.log(loss.item()) / np.log(10.0))
 
@@ -87,7 +102,7 @@ def evaluation(test_dataset,tensorf, args, renderer, savePath=None, N_vis=5, prt
     return PSNRs
 
 @torch.no_grad()
-def evaluation_path(test_dataset,tensorf, c2ws, renderer, savePath=None, N_vis=5, prtx='', N_samples=-1,
+def evaluation_path(test_dataset, tensorf, c2ws, renderer, savePath=None, N_vis=5, prtx='', N_samples=-1,
                     white_bg=False, ndc_ray=False, compute_extra_metrics=True, device='cuda'):
     PSNRs, rgb_maps, depth_maps = [], [], []
     ssims,l_alex,l_vgg=[],[],[]
