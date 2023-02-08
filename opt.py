@@ -14,13 +14,14 @@ def config_parser(cmd=None):
                         help='input data directory')
     parser.add_argument("--progress_refresh_rate", type=int, default=10,
                         help='how many iterations to show psnrs or iters')
+    parser.add_argument("--nearfar", type=float, action="append", help="nearfar distances for the dataset")
 
     parser.add_argument('--with_depth', action='store_true')
     parser.add_argument('--downsample_train', type=float, default=1.0)
     parser.add_argument('--downsample_test', type=float, default=1.0)
 
     parser.add_argument('--model_name', type=str, default='TensorVMSplit',
-                        choices=['TensorVMSplit', 'TensorCP', 'AD_TensorCP'])
+                        choices=['TensorVMSplit', 'TensorCP', 'AD_TensorCP', "AD_TensorVMSplit"])
 
     # loader options
     parser.add_argument("--batch_size", type=int, default=4096)

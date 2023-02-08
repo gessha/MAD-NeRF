@@ -1,0 +1,33 @@
+### Data/Scene parameters ###
+dataset_name = ad_nerf
+datadir = /home/georgi/AD-NeRF/dataset/Obama
+N_voxel_init = 2097156 # 128**3
+N_voxel_final = 262144000 # 640**3
+nearfar = [0.6417922854423523,1.2417922854423522]
+n_lamb_sigma = [16,4,4]
+n_lamb_sh = [48,12,12]
+
+### Model parameters ###
+model_name = AD_TensorVMSplit
+shadingMode = MLP_Fea
+fea2denseAct = relu
+pos_pe = 0
+fea_pe = 0
+audio-dimension = 64
+window-size = 16
+data_dim_color = 27
+
+### Optimization ###
+n_iters = 500000
+batch_size = 8192 # 4096 * 2 
+TV_weight_density = 1.0
+TV_weight_app = 1.0
+upsamp_list = [2000,3000,4000,5500]
+update_AlphaMask_list = [2500]
+
+### Misc parameters ###
+N_vis = 5
+vis_every = 10000
+render_test = 1
+expname =  adnerf_tensorf_003_VM
+basedir = ./log

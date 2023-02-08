@@ -219,7 +219,7 @@ class TanksTempleDataset(Dataset):
 
 class TanksTempleDataset_AUDIO(Dataset):
     """NSVF Generic Dataset."""
-    def __init__(self, datadir, split='train', downsample=1.0, wh=[450,450], is_stack=False, seed=1337, adnerf=True, testskip=1, per_image_loading=True, ray_sample_rate=4096):
+    def __init__(self, datadir, split='train', downsample=1.0, wh=[450,450], is_stack=False, nearfar=None, seed=1337, adnerf=True, testskip=1, per_image_loading=True, ray_sample_rate=4096):
         self.root_dir = datadir
         self.split = split
         self.is_stack = is_stack
@@ -233,7 +233,10 @@ class TanksTempleDataset_AUDIO(Dataset):
         random.seed(seed)
         
         self.white_bg = True
-        self.near_far = [0.01,6.0]
+        if nearfar:
+            self.near_far = nearfar
+        else:
+            self.near_far = [0.01,6.0]
         self.scene_bbox = torch.from_numpy(np.loadtxt(f'{self.root_dir}/bbox.txt')).float()[:6].view(2,3) # *1.2 # COMMENTED OUT, DONE IN REGULAR TANKS TEMPLE DATASET
         self.blender2opencv = np.array([[1, 0, 0, 0], [0, -1, 0, 0], [0, 0, -1, 0], [0, 0, 0, 1]])
         

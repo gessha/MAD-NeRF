@@ -1,0 +1,40 @@
+dataset_name = ad_nerf
+datadir = /home/georgi/AD-NeRF/dataset/Obama
+expname =  adnerf_tensorf_001_CP
+basedir = ./log
+
+n_iters = 30000
+batch_size = 4096
+
+N_voxel_init = 2097156 # 128**3
+N_voxel_final = 125000000 # 500**3
+upsamp_list = [2000,3000,4000,5500,7000]
+update_AlphaMask_list = [2000,4000]
+
+N_vis = 5
+vis_every = 10000
+
+render_test = 1
+
+n_lamb_sigma = [96]
+n_lamb_sh = [128]
+model_name = AD_TensorCP
+
+shadingMode = MLP_Fea
+fea2denseAct = softplus
+
+pos_pe = 6
+view_pe = 6
+fea_pe = 6
+
+srm_weight_mask_thre = 1e-4
+
+L1_weight_inital = 1e-5
+L1_weight_rest = 1e-5
+
+TV_weight_density = 0.1
+TV_weight_app = 0.01
+
+audio-dimension = 64
+window-size = 16
+data_dim_color = 27
