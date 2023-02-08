@@ -86,6 +86,15 @@ def render_test(args):
         evaluation_path(test_dataset,tensorf, c2ws, renderer, f'{logfolder}/{args.expname}/imgs_path_all/',
                                 N_vis=-1, N_samples=-1, white_bg = white_bg, ndc_ray=ndc_ray,device=device)
 
+def accumulate_gradient_norm(model_module):
+    total_norm = 0
+    parameters = [p for p in model_module.parameters() if p.grad is not None and p.requires_grad]
+    for p in parameters:
+        param_norm = p.grad.detach().data.norm(2)
+        total_norm += param_norm.item() ** 2
+    total_norm = total_norm ** 0.5
+    return total_norm
+
 def reconstruction(args):
 
     # init dataset
@@ -213,6 +222,10 @@ def reconstruction(args):
 
         optimizer.zero_grad()
         total_loss.backward()
+        # log audio network 
+        gradient_norm = accumulate_gradient_norm(tensorf.audio_net)
+        summary_writer.add_scalar('train/audio_net_norm', gradient_norm, global_step=iteration)
+        
         optimizer.step()
 
         loss = loss.detach().item()

@@ -285,6 +285,7 @@ class TanksTempleDataset_AUDIO(Dataset):
         self.poses = []
         self.all_rays = []
         self.all_rgbs = []
+        self.all_rects = []
         self.auds = []
         
         if self.split == 'train' or self.testskip == 0:
@@ -320,8 +321,11 @@ class TanksTempleDataset_AUDIO(Dataset):
             self.auds.append(self.transform(aud_features[min(frame['aud_id'], aud_features.shape[0]-1)]))
             # print("Loaded audio")
 
+            self.all_rects.append(np.array(frame['face_rect'], dtype=np.int32))
+
         self.rays_per_image = len(rays_o)
         self.poses = torch.stack(self.poses)
+        self.all_rects = np.concatenate(self.all_rects, 0)
 
         # print(f"Beep {0}")
         center = torch.mean(self.scene_bbox, dim=0)
@@ -381,11 +385,14 @@ class TanksTempleDataset_AUDIO(Dataset):
     
     def __getitem__(self, idx):
 
+        index = random.randint(0, len(self.all_rgbs)-1)
+
         if self.split == 'train':  # use data in the buffers
             if self.per_image_loading:
-                rays = self.all_rays[idx]
-                img = self.all_rgbs[idx]
-                auds = self.auds[idx].float()
+                rays = self.all_rays[index]
+                img = self.all_rgbs[index]
+                auds = self.auds[index].float()
+                rect = self.all_rects[index]
                 
                 indeces = random.sample(range(rays.shape[0]), self.ray_sample_rate)
                 indeces = torch.Tensor(indeces).to(torch.int32)
@@ -398,6 +405,7 @@ class TanksTempleDataset_AUDIO(Dataset):
                     'rays': batch_rays,
                     "rgbs": batch_rgbs,
                     "auds": auds,
+                    "face-rect": rect, 
                 }
 
             else:
@@ -411,10 +419,12 @@ class TanksTempleDataset_AUDIO(Dataset):
             rays = self.all_rays[idx]
             img = self.all_rgbs[idx]
             auds = self.auds[idx].float()
-            
+            rect = self.all_rects[idx]
+
             sample = {
                 'rays': rays,
                 'rgbs': img,
-                'auds': auds
+                'auds': auds,
+                "face-rect": rect, 
             }
         return sample
