@@ -219,7 +219,7 @@ class TanksTempleDataset(Dataset):
 
 class TanksTempleDataset_AUDIO(Dataset):
     """NSVF Generic Dataset."""
-    def __init__(self, datadir, split='train', downsample=1.0, wh=[450,450], is_stack=False, nearfar=None, seed=1337, adnerf=True, testskip=1, per_image_loading=True, ray_sample_rate=4096):
+    def __init__(self, datadir, split='train', downsample=1.0, wh=[450,450], is_stack=False, nearfar=None, seed=1337, adnerf=True, testskip=1, per_image_loading=True, ray_sample_rate=4096, frame_face_mouth_sampling_ratios=[1.00, 0.00, 0.00], smo_size=8):
         self.root_dir = datadir
         self.split = split
         self.is_stack = is_stack
@@ -230,6 +230,8 @@ class TanksTempleDataset_AUDIO(Dataset):
         self.testskip = testskip
         self.per_image_loading = per_image_loading
         self.ray_sample_rate = ray_sample_rate
+        self.frame_face_mouth_sampling_ratios = frame_face_mouth_sampling_ratios
+        self.smo_size = smo_size
         random.seed(seed)
         
         self.white_bg = True
@@ -261,9 +263,9 @@ class TanksTempleDataset_AUDIO(Dataset):
     def read_meta_ADNERF(self):
         
         if self.split == "train":
-            data = json.loads((Path(self.root_dir) / "transforms_train.json").read_text())
+            data = json.loads((Path(self.root_dir) / "transforms_train_extended.json").read_text())
         if self.split == "val":
-            data = json.loads((Path(self.root_dir) / "transforms_val.json").read_text())
+            data = json.loads((Path(self.root_dir) / "transforms_val_extended.json").read_text())
         
         aud_features = np.load(Path(self.root_dir) / 'aud.npy')
         
@@ -285,7 +287,8 @@ class TanksTempleDataset_AUDIO(Dataset):
         self.poses = []
         self.all_rays = []
         self.all_rgbs = []
-        self.all_rects = []
+        self.all_face_rects = []
+        self.all_mouth_rects = []
         self.auds = []
         
         if self.split == 'train' or self.testskip == 0:
@@ -321,37 +324,20 @@ class TanksTempleDataset_AUDIO(Dataset):
             self.auds.append(self.transform(aud_features[min(frame['aud_id'], aud_features.shape[0]-1)]))
             # print("Loaded audio")
 
-            self.all_rects.append(np.array(frame['face_rect'], dtype=np.int32))
+            self.all_face_rects.append(np.array(frame['face_rect'], dtype=np.int32))
+            self.all_mouth_rects.append(np.array(frame['mouth_rect'], dtype=np.int32))
 
         self.rays_per_image = len(rays_o)
         self.poses = torch.stack(self.poses)
-        self.all_rects = np.concatenate(self.all_rects, 0)
+        self.all_face_rects = np.stack(self.all_face_rects, 0)
+        self.all_mouth_rects = np.stack(self.all_mouth_rects, 0)
 
-        # print(f"Beep {0}")
         center = torch.mean(self.scene_bbox, dim=0)
-        # print(f"Beep {1}")
         radius = torch.norm(self.scene_bbox[1]-center)*1.2
-        # print(f"Beep {2}")
         up = torch.mean(self.poses[:, :3, 1], dim=0).tolist()
-        # print(f"Beep {3}")
         pos_gen = circle(radius=radius, h=-0.2*up[1], axis='y')
-        # print(f"Beep {4}")
         self.render_path = gen_path(pos_gen, up=up,frames=200)
-        # print(f"Beep {5}")
-        self.render_path[:, :3, 3] += center
-        # print(f"Beep {6}")
-
-        ### Old way of stacking data
-        # if 'train' == self.split:
-        #     if self.is_stack:
-        #         self.all_rays = torch.stack(self.all_rays, 0).reshape(-1,*self.img_wh[::-1], 6)  # (len(self.meta['frames])*h*w, 3)
-        #         self.all_rgbs = torch.stack(self.all_rgbs, 0).reshape(-1,*self.img_wh[::-1], 3)  # (len(self.meta['frames])*h*w, 3) 
-        #     else:
-        #         self.all_rays = torch.cat(self.all_rays, 0)  # (len(self.meta['frames])*h*w, 3)
-        #         self.all_rgbs = torch.cat(self.all_rgbs, 0)  # (len(self.meta['frames])*h*w, 3)
-        # else:
-        #     self.all_rays = torch.stack(self.all_rays, 0)  # (len(self.meta['frames]),h*w, 3)
-        #     self.all_rgbs = torch.stack(self.all_rgbs, 0).reshape(-1,*self.img_wh[::-1], 3)  # (len(self.meta['frames]),h,w,3)        
+        self.render_path[:, :3, 3] += center        
         
         ### NEW WAY of stacking data
         self.all_rays = torch.stack(self.all_rays, 0)  # (len(self.meta['frames]),h*w, 3)
@@ -360,6 +346,36 @@ class TanksTempleDataset_AUDIO(Dataset):
         ###
         # AD-NeRF modification END
         ### 
+    def get_random_indeces_within_rect(self, rect, N_rays_in, N_rays_out):
+        H = self.img_wh[0]
+        W = self.img_wh[1]
+
+        coords = torch.stack(torch.meshgrid(torch.linspace(0, H-1, H), torch.linspace(0, W-1, W)), -1)  # (H, W, 2)
+        coords = torch.reshape(coords, [-1, 2])  # (H * W, 2)
+
+        rect_inds = (coords[:, 0] >= rect[0]) & (
+            coords[:, 0] <= rect[0] + rect[2]) & (
+                coords[:, 1] >= rect[1]) & (
+                    coords[:, 1] <= rect[1] + rect[3])
+        coords_rect = coords[rect_inds]
+        coords_norect = coords[~rect_inds]
+
+        rect_num = N_rays_in
+        norect_num = N_rays_out
+
+        select_inds_rect = np.random.choice(
+            coords_rect.shape[0], size=[rect_num], replace=False)  # (N_rand,)
+        # (N_rand, 2)
+        select_coords_rect = coords_rect[select_inds_rect].long()
+        select_inds_norect = np.random.choice(
+            coords_norect.shape[0], size=[norect_num], replace=False)  # (N_rand,)
+        # (N_rand, 2)
+        select_coords_norect = coords_norect[select_inds_norect].long(
+        )
+        select_coords = torch.cat(
+            (select_coords_rect, select_coords_norect), dim=0)
+        
+        return select_coords
  
     def define_transforms(self):
         self.transform = T.ToTensor()
@@ -385,46 +401,96 @@ class TanksTempleDataset_AUDIO(Dataset):
     
     def __getitem__(self, idx):
 
-        index = random.randint(0, len(self.all_rgbs)-1)
+        if self.split == 'train':
+            index = random.randint(0, len(self.all_rgbs)-1)
+            rays = self.all_rays[index]
+            img = self.all_rgbs[index]
+            
+            auds = self.auds[index].float()
+            
+            ### get audio window ###
+            smo_half_win = int(self.smo_size / 2)
+            left_i = index - smo_half_win
+            right_i = index + smo_half_win
+            pad_left, pad_right = 0, 0
+            dataset_size = len(self.all_rgbs)
+            if left_i < 0:
+                pad_left = -left_i
+                left_i = 0
+            if right_i > dataset_size:
+                pad_right = right_i-dataset_size
+                right_i = dataset_size
+            auds_win = self.auds[left_i:right_i]
+            if pad_left > 0:
+                auds_win = torch.cat((torch.zeros_like(auds_win)[:pad_left], auds_win), dim=0)
+            if pad_right > 0:
+                auds_win = torch.cat((auds_win, torch.zeros_like(auds_win)[:pad_right]), dim=0)
+            auds_win = torch.concatenate(auds_win)
+            print(f"Left: {left_i}, Right: {right_i}, Auds_win.shape: {len(auds_win)}")
+            ### get audio window END ###
 
-        if self.split == 'train':  # use data in the buffers
-            if self.per_image_loading:
-                rays = self.all_rays[index]
-                img = self.all_rgbs[index]
-                auds = self.auds[index].float()
-                rect = self.all_rects[index]
+            face_rect = self.all_face_rects[index]
+            mouth_rect = self.all_mouth_rects[index]
+            frame_rate, face_rate, mouth_rate = self.frame_face_mouth_sampling_ratios
+            batch_size = self.ray_sample_rate
+            mouth_ray_count = int(batch_size * mouth_rate)
+            face_ray_count = int(batch_size * face_rate)
+            frame_ray_count = batch_size - face_ray_count - mouth_ray_count
+
+            mouth_rays_coords = self.get_random_indeces_within_rect(mouth_rect, mouth_ray_count, N_rays_out=0) # select only rays and rgbs within mouth bbox
+            face_rays_coords = self.get_random_indeces_within_rect(face_rect, face_ray_count, N_rays_out=0) # select only rays and rgbs within face bbox
+            frame_rays_coords = self.get_random_indeces_within_rect(face_rect, N_rays_in=0, N_rays_out=frame_ray_count) # select rays and rgbs OUTSIDE face box
+
+            print(f"{mouth_ray_count}, {face_ray_count}, {frame_ray_count}")
+            print(f"Mouth coord shape: {mouth_rays_coords.shape} Face coord shape: {face_rays_coords.shape}, Frame coord shape: {frame_rays_coords.shape}")
+            
+            if face_rate != 0 or mouth_rate != 0:
+                # print("face_rate != 0 or mouth_rate != 0:")
+                rays = rays.reshape(self.img_wh[0], self.img_wh[1], 6)
+                rgbs = img
                 
+                mouth_rays = rays[mouth_rays_coords[:, 0], mouth_rays_coords[:, 1]]
+                mouth_rgbs = rgbs[mouth_rays_coords[:, 0], mouth_rays_coords[:, 1]]
+
+                face_rays = rays[face_rays_coords[:, 0], face_rays_coords[:, 1]]
+                face_rgbs = rgbs[face_rays_coords[:, 0], face_rays_coords[:, 1]]
+
+                frame_rays = rays[frame_rays_coords[:, 0], frame_rays_coords[:, 1]]
+                frame_rgbs = rgbs[frame_rays_coords[:, 0], frame_rays_coords[:, 1]]
+                
+                batch_rays = torch.concatenate([mouth_rays, face_rays, frame_rays])
+                batch_rgbs = torch.concatenate([mouth_rgbs, face_rgbs, frame_rgbs])
+
+            else:
+                # print("NOT face_rate != 0 or mouth_rate != 0:")
                 indeces = random.sample(range(rays.shape[0]), self.ray_sample_rate)
                 indeces = torch.Tensor(indeces).to(torch.int32)
-                
+
                 batch_rays = torch.index_select(rays, 0, indeces) 
                 batch_rgbs = img.reshape(rays.shape[0], 3)
                 batch_rgbs = torch.index_select(batch_rgbs, 0, indeces)
-                
-                sample = {
-                    'rays': batch_rays,
-                    "rgbs": batch_rgbs,
-                    "auds": auds,
-                    "face-rect": rect, 
-                }
 
-            else:
-                sample = {
-                    'rays': self.all_rays[idx],
-                    'rgbs': self.all_rgbs[idx]
-                }
+            sample = {
+                'index': index,
+                'rays': batch_rays,
+                "rgbs": batch_rgbs,
+                "auds": auds,
+                "auds-win": auds_win,
+                "face-rect": face_rect,
+                "mouth-rect": mouth_rect, 
+            }
 
         else:  
             # create data for each image separately
             rays = self.all_rays[idx]
             img = self.all_rgbs[idx]
             auds = self.auds[idx].float()
-            rect = self.all_rects[idx]
+            # rect = self.all_face_rects[idx] not needed during testing
 
             sample = {
                 'rays': rays,
                 'rgbs': img,
                 'auds': auds,
-                "face-rect": rect, 
+                # "face-rect": rect, # not needed during testing
             }
         return sample

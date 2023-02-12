@@ -99,7 +99,7 @@ def reconstruction(args):
 
     # init dataset
     dataset = dataset_dict[args.dataset_name]
-    train_dataset = dataset(args.datadir, split='train', downsample=args.downsample_train, is_stack=False, nearfar=args.nearfar, ray_sample_rate=args.batch_size)
+    train_dataset = dataset(args.datadir, split='train', downsample=args.downsample_train, is_stack=False, nearfar=args.nearfar, ray_sample_rate=args.batch_size, frame_face_mouth_sampling_ratios=args.frame_face_mouth_sampling_ratios)
     test_dataset = dataset(args.datadir, split='val', downsample=args.downsample_train, is_stack=True, nearfar=args.nearfar)
     white_bg = train_dataset.white_bg
     near_far = train_dataset.near_far
@@ -222,7 +222,7 @@ def reconstruction(args):
 
         optimizer.zero_grad()
         total_loss.backward()
-        # log audio network 
+        # log audio network gradient norm
         gradient_norm = accumulate_gradient_norm(tensorf.audio_net)
         summary_writer.add_scalar('train/audio_net_norm', gradient_norm, global_step=iteration)
         
@@ -254,7 +254,8 @@ def reconstruction(args):
                                     prtx=f'{iteration:06d}_', N_samples=nSamples, white_bg = white_bg, ndc_ray=ndc_ray, compute_extra_metrics=False)
             summary_writer.add_scalar('test/psnr', np.mean(PSNRs_test), global_step=iteration)
 
-
+        if iteration % args.save_every == args.save_every - 1:
+            tensorf.save(f'{logfolder}/{args.expname}_{iteration}.th')
 
         if iteration in update_AlphaMask_list:
 
@@ -322,6 +323,7 @@ if __name__ == '__main__':
     np.random.seed(20211202)
 
     args = config_parser()
+    args.frame_face_mouth_sampling_ratios = [float(item) for item in args.frame_face_mouth_sampling_ratios]
     print(args)
 
     if  args.export_mesh:
