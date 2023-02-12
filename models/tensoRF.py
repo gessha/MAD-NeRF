@@ -596,7 +596,7 @@ class AD_TensorVMSplit(TensorVMSplit):
     def __init__(self, aabb, gridSize, device, audio_dimension, window_size, **kargs):
         self.audio_dimension = audio_dimension
         super(TensorVMSplit, self).__init__(aabb, gridSize, device, **kargs)
-        self.audio_net = AudioNet(audio_dimension, window_size).to(device)
+        # self.audio_net = AudioNet(audio_dimension, window_size).to(device)
 
     def init_render_func(self, shadingMode, pos_pe, view_pe, fea_pe, featureC, device):
         if shadingMode == 'MLP_PE':
@@ -626,15 +626,15 @@ class AD_TensorVMSplit(TensorVMSplit):
         ]
         if isinstance(self.renderModule, torch.nn.Module):
             grad_vars += [{'params':self.renderModule.parameters(), 'lr':lr_init_network}]
-        if isinstance(self.audio_net, torch.nn.Module):
-            grad_vars += [{'params':self.audio_net.parameters(), 'lr':lr_init_network}]
+        # if isinstance(self.audio_net, torch.nn.Module):
+            # grad_vars += [{'params':self.audio_net.parameters(), 'lr':lr_init_network}]
 
         return grad_vars
 
-    def compute_audio_feature(self, audio_tensor):
-        return self.audio_net(audio_tensor)     
+    # def compute_audio_feature(self, audio_tensor):
+        # return self.audio_net(audio_tensor)     
 
-    def forward(self, rays_chunk, audio_inputs, white_bg=True, is_train=False, ndc_ray=False, N_samples=-1):
+    def forward(self, rays_chunk, audio_features, white_bg=True, is_train=False, ndc_ray=False, N_samples=-1):
 
         # sample points
         viewdirs = rays_chunk[:, 3:6]
@@ -673,12 +673,12 @@ class AD_TensorVMSplit(TensorVMSplit):
 
         if app_mask.any():
             app_features = self.compute_appfeature(xyz_sampled[app_mask])
-            audio_features = self.compute_audio_feature(audio_inputs)
+            # audio_features = self.compute_audio_feature(audio_inputs)
             
             # print(xyz_sampled[app_mask].shape, audio_inputs.shape, app_features.shape, audio_features.shape)
-            batch_size, _ = app_features.shape
-            audio_feature_size = audio_features.shape[0]
-            audio_features = audio_features.broadcast_to([batch_size, audio_feature_size])
+            # batch_size, _ = app_features.shape
+            # audio_feature_size = audio_features.shape[0]
+            # audio_features = audio_features.broadcast_to([batch_size, audio_feature_size])
             
             composite_features = torch.cat([app_features, audio_features], dim=1)
             valid_rgbs = self.renderModule(xyz_sampled[app_mask], viewdirs[app_mask], composite_features)

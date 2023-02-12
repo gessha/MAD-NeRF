@@ -1,9 +1,6 @@
-
 import os
 from tqdm.auto import tqdm
 from opt import config_parser
-
-
 
 import json, random
 from renderer import *
@@ -13,8 +10,6 @@ import datetime
 
 from dataLoader import dataset_dict
 import sys
-
-
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -34,7 +29,6 @@ class SimpleSampler:
             self.ids = torch.LongTensor(np.random.permutation(self.total))
             self.curr = 0
         return self.ids[self.curr:self.curr+self.batch]
-
 
 @torch.no_grad()
 def export_mesh(args):
@@ -125,8 +119,6 @@ def reconstruction(args):
     os.makedirs(f'{logfolder}/rgba', exist_ok=True)
     summary_writer = SummaryWriter(logfolder)
 
-
-
     # init parameters
     # tensorVM, renderer = init_parameters(args, train_dataset.scene_bbox.to(device), reso_list[0])
     aabb = train_dataset.scene_bbox.to(device)
@@ -138,14 +130,20 @@ def reconstruction(args):
         ckpt = torch.load(args.ckpt, map_location=device)
         kwargs = ckpt['kwargs']
         kwargs.update({'device':device})
+        
         tensorf = eval(args.model_name)(**kwargs)
         tensorf.load(ckpt)
+        audio_network = AudioNet(args.audio_dimension, args.window_size).to(device)
+        audio_attention_network = AudioAttNet().to(device)
+
+        # TODO load audio network checkpoints
     else:
         tensorf = eval(args.model_name)(aabb, reso_cur, device, audio_dimension=args.audio_dimension, window_size=args.window_size,
                     density_n_comp=n_lamb_sigma, appearance_n_comp=n_lamb_sh, app_dim=args.data_dim_color, near_far=near_far,
                     shadingMode=args.shadingMode, alphaMask_thres=args.alpha_mask_thre, density_shift=args.density_shift, distance_scale=args.distance_scale,
                     pos_pe=args.pos_pe, view_pe=args.view_pe, fea_pe=args.fea_pe, featureC=args.featureC, step_ratio=args.step_ratio, fea2denseAct=args.fea2denseAct)
-
+        audio_network = AudioNet(args.audio_dimension, args.window_size).to(device)
+        audio_attention_network = AudioAttNet().to(device)
 
     grad_vars = tensorf.get_optparam_groups(args.lr_init, args.lr_basis)
     if args.lr_decay_iters > 0:
@@ -157,7 +155,8 @@ def reconstruction(args):
     print("lr decay", args.lr_decay_target_ratio, args.lr_decay_iters)
     
     optimizer = torch.optim.Adam(grad_vars, betas=(0.9,0.99))
-
+    optimizer_audio = torch.optim.Adam(params=list(audio_network.parameters()), lr=args.lr_basis, betas=(0.9, 0.999))
+    optimizer_audio_attention = torch.optim.Adam(params=list(audio_attention_network.parameters()), lr=args.lr_basis, betas=(0.9, 0.999))
 
     #linear in logrithmic space
     N_voxel_list = (torch.round(torch.exp(torch.linspace(np.log(args.N_voxel_init), np.log(args.N_voxel_final), len(upsamp_list)+1))).long()).tolist()[1:]
@@ -185,14 +184,24 @@ def reconstruction(args):
     for iteration in pbar:
 
         # ray_idx = trainingSampler.nextids()
-        dataset_index = iteration % len(train_dataset)
-        dataset_item = train_dataset[dataset_index]
+        # dataset_index = iteration % len(train_dataset)
+        dataset_item = train_dataset[iteration]
+
         # rays_train, rgb_train, aud_train = train_dataset[dataset_index]
-        rays_train, rgb_train, aud_train = dataset_item['rays'].to(device), dataset_item['rgbs'].to(device), dataset_item['auds'].to(device)
+        rays_train, rgb_train, audio_train, audio_window = dataset_item['rays'].to(device), dataset_item['rgbs'].to(device), dataset_item['auds'].to(device), dataset_item['auds-win'].to(device)
         # rays_train, rgb_train = allrays[ray_idx], allrgbs[ray_idx].to(device)
 
+
+        if iteration < args.no_smoothing_training_period:
+            audio_features = audio_network(audio_train.unsqueeze(0))
+            audio_features = audio_features.broadcast_to([rays_train.shape[0], audio_features.shape[0]])
+        else:
+            audio_features_interim = audio_network(audio_window)
+            audio_features = audio_attention_network(audio_features_interim)
+            audio_features = audio_features.broadcast_to([rays_train.shape[0], audio_features.shape[0]])
+
         #rgb_map, alphas_map, depth_map, weights, uncertainty
-        rgb_map, alphas_map, depth_map, weights, uncertainty = renderer(rays_train, aud_train, tensorf, chunk=args.batch_size,
+        rgb_map, alphas_map, depth_map, weights, uncertainty = renderer(rays_train, audio_features, tensorf, chunk=args.batch_size,
                                 N_samples=nSamples, white_bg = white_bg, ndc_ray=ndc_ray, device=device, is_train=True)
 
         loss = torch.mean((rgb_map - rgb_train) ** 2)
@@ -221,13 +230,18 @@ def reconstruction(args):
             summary_writer.add_scalar('train/reg_tv_app', loss_tv.detach().item(), global_step=iteration)
 
         optimizer.zero_grad()
+        optimizer_audio.zero_grad()
+        optimizer_audio_attention.zero_grad()
         total_loss.backward()
         # log audio network gradient norm
-        gradient_norm = accumulate_gradient_norm(tensorf.audio_net)
-        summary_writer.add_scalar('train/audio_net_norm', gradient_norm, global_step=iteration)
+        audio_network_gradient_norm = accumulate_gradient_norm(audio_network)
+        summary_writer.add_scalar('train/audio_net_norm', audio_network_gradient_norm, global_step=iteration)
+        audio_attention_network_gradient_norm = accumulate_gradient_norm(audio_attention_network)
+        summary_writer.add_scalar('train/audio_net_norm', audio_attention_network_gradient_norm, global_step=iteration)
         
         optimizer.step()
-
+        optimizer_audio.step()
+        optimizer_audio_attention.step()
         loss = loss.detach().item()
         
         PSNRs.append(-10.0 * np.log(loss) / np.log(10.0))
@@ -315,8 +329,7 @@ def reconstruction(args):
         evaluation_path(test_dataset,tensorf, c2ws, renderer, f'{logfolder}/imgs_path_all/',
                                 N_vis=-1, N_samples=-1, white_bg = white_bg, ndc_ray=ndc_ray,device=device)
 
-
-if __name__ == '__main__':
+sif __name__ == '__main__':
 
     torch.set_default_dtype(torch.float32)
     torch.manual_seed(20211202)
@@ -333,4 +346,3 @@ if __name__ == '__main__':
         render_test(args)
     else:
         reconstruction(args)
-
