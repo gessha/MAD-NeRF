@@ -6,7 +6,6 @@ N_voxel_final = 262144000 # 640**3
 nearfar = [0.6417922854423523,1.2417922854423522]
 n_lamb_sigma = [16,4,4]
 n_lamb_sh = [48,12,12]
-frame_face_mouth_sampling_ratios = [1.00, 0.00, 0.00]
 
 ### Model parameters ###
 model_name = AD_TensorVMSplit
@@ -16,7 +15,7 @@ pos_pe = 0
 fea_pe = 0
 audio-dimension = 64
 window-size = 16
-data_dim_color = 27
+data_dim_color = 14
 
 ### Optimization ###
 n_iters = 500000
