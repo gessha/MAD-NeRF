@@ -1,3 +1,6 @@
+import torch
+torch.set_num_threads(4) # fix to prevent throttling on single GPU processes
+
 import os
 from tqdm.auto import tqdm
 from opt import config_parser
@@ -47,32 +50,48 @@ def export_mesh(args):
 def render_test(args):
     # init dataset
     dataset = dataset_dict[args.dataset_name]
-    test_dataset = dataset(args.datadir, split='test', downsample=args.downsample_train, is_stack=True)
-    white_bg = test_dataset.white_bg
     ndc_ray = args.ndc_ray
 
     if not os.path.exists(args.ckpt):
         print('the ckpt path does not exists!!')
         return
 
+    assert args.ckpt is not None, "Network checkpoint is None"
+    assert args.audio_checkpoint is not None, "Audio network checkpoint is None"
+    assert args.audio_attention_checkpoint is not None, "Audio attention network checkpoint is None"
+
     ckpt = torch.load(args.ckpt, map_location=device)
     kwargs = ckpt['kwargs']
     kwargs.update({'device': device})
-    tensorf = eval(args.model_name)(**kwargs)
+    tensorf = eval(args.model_name)(audio_dimension=args.audio_dimension, window_size=args.window_size, **kwargs)
     tensorf.load(ckpt)
+
+    ckpt = torch.load(args.audio_checkpoint, map_location=device)
+    audio_network = AudioNet(args.audio_dimension, args.window_size).to(device)
+    audio_network.load(ckpt)
+
+    ckpt = torch.load(args.audio_attention_checkpoint, map_location=device)
+    audio_attention_network = AudioAttNet().to(device)
+    audio_attention_network.load(ckpt)
+
+    checkpoint_iteration_count = args.audio_checkpoint.split("_")[-2]
 
     logfolder = os.path.dirname(args.ckpt)
     if args.render_train:
         os.makedirs(f'{logfolder}/imgs_train_all', exist_ok=True)
-        train_dataset = dataset(args.datadir, split='train', downsample=args.downsample_train, is_stack=True)
-        PSNRs_test = evaluation(train_dataset,tensorf, args, renderer, f'{logfolder}/imgs_train_all/',
+        train_dataset = dataset(args.datadir, split='train', downsample=args.downsample_train, is_stack=True, evaluation_mode=True)
+        white_bg = train_dataset.white_bg
+        PSNRs_train = evaluation(train_dataset, tensorf, audio_network, args, renderer, f'{logfolder}/imgs_train_all_{checkpoint_iteration_count}', prtx=f"{checkpoint_iteration_count}_",
                                 N_vis=-1, N_samples=-1, white_bg = white_bg, ndc_ray=ndc_ray,device=device)
-        print(f'======> {args.expname} train all psnr: {np.mean(PSNRs_test)} <========================')
+        print(f'NOT FULL EVALUATION SET ======> {args.expname} train all psnr: {np.mean(PSNRs_train)} <========================')
 
     if args.render_test:
-        os.makedirs(f'{logfolder}/{args.expname}/imgs_test_all', exist_ok=True)
-        evaluation(test_dataset,tensorf, args, renderer, f'{logfolder}/{args.expname}/imgs_test_all/',
-                                N_vis=-1, N_samples=-1, white_bg = white_bg, ndc_ray=ndc_ray,device=device)
+        os.makedirs(f'{logfolder}/imgs_test_all', exist_ok=True)
+        test_dataset = dataset(args.datadir, split='val', downsample=args.downsample_train, is_stack=True, evaluation_mode=True)
+        white_bg = test_dataset.white_bg
+        PSNRs_test = evaluation(test_dataset, tensorf, audio_network, args, renderer, f'{logfolder}/imgs_test_all_{checkpoint_iteration_count}', prtx=f"{checkpoint_iteration_count}_",
+                        N_vis=-1, N_samples=-1, white_bg = white_bg, ndc_ray=ndc_ray,device=device)
+        print(f'NOT FULL EVALUATION SET ======> {args.expname} test all psnr: {np.mean(PSNRs_test)} <========================')
 
     if args.render_path:
         c2ws = test_dataset.render_path
@@ -127,14 +146,23 @@ def reconstruction(args):
 
 
     if args.ckpt is not None:
+        assert args.audio_checkpoint is not None, "Audio network checkpoint is None"
+        assert args.audio_attention_checkpoint is not None, "Audio attention network checkpoint is None"
+
         ckpt = torch.load(args.ckpt, map_location=device)
         kwargs = ckpt['kwargs']
         kwargs.update({'device':device})
         
         tensorf = eval(args.model_name)(**kwargs)
         tensorf.load(ckpt)
+
+        ckpt = torch.load(args.audio_checkpoint, map_location=device)
         audio_network = AudioNet(args.audio_dimension, args.window_size).to(device)
+        audio_network.load(ckpt)
+
+        ckpt = torch.load(args.audio_attention_checkpoint, map_location=device)
         audio_attention_network = AudioAttNet().to(device)
+        audio_attention_network.load(ckpt)
 
         # TODO load audio network checkpoints
     else:
@@ -193,13 +221,14 @@ def reconstruction(args):
 
 
         if iteration < args.no_smoothing_training_period:
-            audio_features = audio_network(audio_train.unsqueeze(0))
-            audio_features = audio_features.broadcast_to([rays_train.shape[0], audio_features.shape[0]])
+            audio_features = audio_network(audio_train)
+            # audio_features = audio_features.broadcast_to([rays_train.shape[0], audio_features.shape[0]])
         else:
             audio_features_interim = audio_network(audio_window)
             audio_features = audio_attention_network(audio_features_interim)
-            audio_features = audio_features.broadcast_to([rays_train.shape[0], audio_features.shape[0]])
+            # audio_features = audio_features.broadcast_to([rays_train.shape[0], audio_features.shape[0]])
 
+        # print(audio_features.shape)
         #rgb_map, alphas_map, depth_map, weights, uncertainty
         rgb_map, alphas_map, depth_map, weights, uncertainty = renderer(rays_train, audio_features, tensorf, chunk=args.batch_size,
                                 N_samples=nSamples, white_bg = white_bg, ndc_ray=ndc_ray, device=device, is_train=True)
@@ -264,12 +293,14 @@ def reconstruction(args):
 
 
         if iteration % args.vis_every == args.vis_every - 1 and args.N_vis!=0:
-            PSNRs_test = evaluation(test_dataset,tensorf, args, renderer, f'{logfolder}/imgs_vis/', N_vis=args.N_vis,
+            PSNRs_test = evaluation(test_dataset,tensorf, audio_network, args, renderer, f'{logfolder}/imgs_vis/', N_vis=args.N_vis,
                                     prtx=f'{iteration:06d}_', N_samples=nSamples, white_bg = white_bg, ndc_ray=ndc_ray, compute_extra_metrics=False)
             summary_writer.add_scalar('test/psnr', np.mean(PSNRs_test), global_step=iteration)
 
         if iteration % args.save_every == args.save_every - 1:
             tensorf.save(f'{logfolder}/{args.expname}_{iteration}.th')
+            audio_network.save(f'{logfolder}/{args.expname}_{iteration}_audio.th')
+            audio_attention_network.save(f'{logfolder}/{args.expname}_{iteration}_audio_attention.th')
 
         if iteration in update_AlphaMask_list:
 
@@ -310,13 +341,13 @@ def reconstruction(args):
     if args.render_train:
         os.makedirs(f'{logfolder}/imgs_train_all', exist_ok=True)
         train_dataset = dataset(args.datadir, split='train', downsample=args.downsample_train, is_stack=True)
-        PSNRs_test = evaluation(train_dataset, tensorf, args, renderer, f'{logfolder}/imgs_train_all/',
+        PSNRs_test = evaluation(train_dataset, tensorf, audio_network, args, renderer, f'{logfolder}/imgs_train_all/',
                                 N_vis=-1, N_samples=-1, white_bg = white_bg, ndc_ray=ndc_ray,device=device)
-        print(f'======> {args.expname} test all psnr: {np.mean(PSNRs_test)} <========================')
+        print(f'======> {args.expname} train all psnr: {np.mean(PSNRs_test)} <========================')
 
     if args.render_test:
         os.makedirs(f'{logfolder}/imgs_test_all', exist_ok=True)
-        PSNRs_test = evaluation(test_dataset, tensorf, args, renderer, f'{logfolder}/imgs_test_all/',
+        PSNRs_test = evaluation(test_dataset, tensorf, audio_network, args, renderer, f'{logfolder}/imgs_test_all/',
                                 N_vis=-1, N_samples=-1, white_bg = white_bg, ndc_ray=ndc_ray,device=device)
         summary_writer.add_scalar('test/psnr_all', np.mean(PSNRs_test), global_step=iteration)
         print(f'======> {args.expname} test all psnr: {np.mean(PSNRs_test)} <========================')
@@ -329,7 +360,7 @@ def reconstruction(args):
         evaluation_path(test_dataset,tensorf, c2ws, renderer, f'{logfolder}/imgs_path_all/',
                                 N_vis=-1, N_samples=-1, white_bg = white_bg, ndc_ray=ndc_ray,device=device)
 
-sif __name__ == '__main__':
+if __name__ == '__main__':
 
     torch.set_default_dtype(torch.float32)
     torch.manual_seed(20211202)
@@ -342,7 +373,7 @@ sif __name__ == '__main__':
     if  args.export_mesh:
         export_mesh(args)
 
-    if args.render_only and (args.render_test or args.render_path):
+    if args.render_only and (args.render_test or args.render_path or args.render_train):
         render_test(args)
     else:
         reconstruction(args)

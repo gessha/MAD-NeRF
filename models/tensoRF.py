@@ -465,6 +465,16 @@ class AudioAttNet(nn.Module):
         y = self.attentionNet(y.view(1, self.seq_len)).view(self.seq_len, 1)
         # print(y.view(-1).data)
         return torch.sum(y*x, dim=0)
+
+    def load(self, ckpt):
+        self.load_state_dict(ckpt['state_dict'])
+
+    def save(self, path):
+        ckpt = {
+            'state_dict': self.state_dict()
+        }
+        torch.save(ckpt, path)
+
 # Audio feature extractor
 class AudioNet(nn.Module):
     def __init__(self, dim_aud=76, win_size=16):
@@ -497,6 +507,15 @@ class AudioNet(nn.Module):
         x = self.encoder_conv(x).squeeze(-1)
         x = self.encoder_fc1(x).squeeze()
         return x
+
+    def load(self, ckpt):
+        self.load_state_dict(ckpt['state_dict'])
+
+    def save(self, path):
+        ckpt = {
+            'state_dict': self.state_dict()
+        }
+        torch.save(ckpt, path)
 
 # New Audio Driven NeRF, TensorCP version
 class AD_TensorCP(TensorCP):
@@ -676,10 +695,10 @@ class AD_TensorVMSplit(TensorVMSplit):
             # audio_features = self.compute_audio_feature(audio_inputs)
             
             # print(xyz_sampled[app_mask].shape, audio_inputs.shape, app_features.shape, audio_features.shape)
-            # batch_size, _ = app_features.shape
-            # audio_feature_size = audio_features.shape[0]
-            # audio_features = audio_features.broadcast_to([batch_size, audio_feature_size])
-            
+            batch_size, _ = app_features.shape
+            audio_feature_size = audio_features.shape[0]
+            audio_features = audio_features.broadcast_to([batch_size, audio_feature_size])
+            # print(app_features.shape, audio_features.shape)
             composite_features = torch.cat([app_features, audio_features], dim=1)
             valid_rgbs = self.renderModule(xyz_sampled[app_mask], viewdirs[app_mask], composite_features)
             rgb[app_mask] = valid_rgbs

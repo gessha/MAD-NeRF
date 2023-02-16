@@ -33,7 +33,7 @@ def OctreeRender_trilinear_fast(rays, tensorf, chunk=4096, N_samples=-1, ndc_ray
     return torch.cat(rgbs), None, torch.cat(depth_maps), None, None
 
 @torch.no_grad()
-def evaluation(test_dataset, tensorf, args, renderer, savePath=None, N_vis=5, prtx='', N_samples=-1,
+def evaluation(test_dataset, tensorf, audio_network, args, renderer, savePath=None, N_vis=5, prtx='', N_samples=-1,
                white_bg=False, ndc_ray=False, compute_extra_metrics=True, device='cuda'):
     PSNRs, rgb_maps, depth_maps = [], [], []
     ssims,l_alex,l_vgg=[],[],[]
@@ -55,8 +55,9 @@ def evaluation(test_dataset, tensorf, args, renderer, savePath=None, N_vis=5, pr
         rays = dataset_item['rays'].to(device)
         gt_rgb = dataset_item['rgbs']
         auds = dataset_item['auds'].to(device)
+        audio_features = audio_network(auds)
         # print(tensorf.aabb.device, rays.device, auds.device)
-        rgb_map, _, depth_map, _, _ = renderer(rays, auds, tensorf, chunk=4096, N_samples=N_samples,
+        rgb_map, _, depth_map, _, _ = renderer(rays, audio_features, tensorf, chunk=4096, N_samples=N_samples,
                                         ndc_ray=ndc_ray, white_bg = white_bg, device=device)
         rgb_map = rgb_map.clamp(0.0, 1.0)
 

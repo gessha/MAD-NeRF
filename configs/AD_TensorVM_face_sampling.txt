@@ -25,10 +25,11 @@ TV_weight_density = 1.0
 TV_weight_app = 1.0
 upsamp_list = [2000,3000,4000,5500]
 update_AlphaMask_list = [2500]
+no_smoothing_training_period = 1000000
 
 ### Misc parameters ###
 N_vis = 5
-vis_every = 10000
+vis_every = 30000
 render_test = 1
 expname =  adnerf_tensorf_003_VM
-basedir = ./log
+basedir = /data/add_disk0/georgi/TensoRF_logs/

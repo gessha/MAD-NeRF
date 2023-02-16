@@ -2,7 +2,7 @@
 dataset_name = ad_nerf
 datadir = /home/georgi/AD-NeRF/dataset/Obama
 nearfar = [0.6417922854423523,1.2417922854423522]
-frame_face_mouth_sampling_ratios = '[1.00, 0.00, 0.00]'
+frame_face_mouth_sampling_ratios = '[0.05, 0.80, 0.15]'
 audio-dimension = 64
 window-size = 16
 

@@ -45,7 +45,7 @@ def config_parser(cmd=None):
                         help='the target decay ratio; after decay_iters inital lr decays to lr*ratio')
     parser.add_argument("--lr_upsample_reset", type=int, default=1,
                         help='reset lr to inital after upsampling')
-    parser.add_argument("--no_smoothing_training_period", type=int, default=200000, help="iteration when audio feature smoothing begins")
+    parser.add_argument("--no_smoothing_training_period", type=int, default=1000000, help="iteration when audio feature smoothing begins")
 
     # loss
     parser.add_argument("--L1_weight_inital", type=float, default=0.0,
@@ -92,6 +92,10 @@ def config_parser(cmd=None):
 
     parser.add_argument("--ckpt", type=str, default=None,
                         help='specific weights npy file to reload for coarse network')
+    parser.add_argument("--audio_checkpoint", type=str, default=None,
+                        help='weights for audio network')
+    parser.add_argument("--audio_attention_checkpoint", type=str, default=None,
+                        help='weights for audio attention network')
     parser.add_argument("--render_only", type=int, default=0)
     parser.add_argument("--render_test", type=int, default=0)
     parser.add_argument("--render_train", type=int, default=0)
