@@ -469,9 +469,10 @@ class AudioAttNet(nn.Module):
     def load(self, ckpt):
         self.load_state_dict(ckpt['state_dict'])
 
-    def save(self, path):
+    def save(self, path, optimizer_state=None):
         ckpt = {
-            'state_dict': self.state_dict()
+            'state_dict': self.state_dict(),
+            'optimizer_state_dict': optimizer_state
         }
         torch.save(ckpt, path)
 
@@ -511,9 +512,10 @@ class AudioNet(nn.Module):
     def load(self, ckpt):
         self.load_state_dict(ckpt['state_dict'])
 
-    def save(self, path):
+    def save(self, path, optimizer_state=None):
         ckpt = {
-            'state_dict': self.state_dict()
+            'state_dict': self.state_dict(),
+            'optimizer_state_dict': optimizer_state
         }
         torch.save(ckpt, path)
 

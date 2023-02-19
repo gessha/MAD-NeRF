@@ -146,6 +146,7 @@ def reconstruction(args):
 
 
     if args.ckpt is not None:
+        print(f"!!! Loading checkpoints from: !!! \n\t[TENSORF CKPT]{args.ckpt}\n\t[AUDIO CKPT]{args.audio_checkpoint}\n\t[AUDIO ATTN CKPT]{args.audio_attention_checkpoint}")
         assert args.audio_checkpoint is not None, "Audio network checkpoint is None"
         assert args.audio_attention_checkpoint is not None, "Audio attention network checkpoint is None"
 
@@ -163,9 +164,8 @@ def reconstruction(args):
         ckpt = torch.load(args.audio_attention_checkpoint, map_location=device)
         audio_attention_network = AudioAttNet().to(device)
         audio_attention_network.load(ckpt)
-
-        # TODO load audio network checkpoints
     else:
+        print("+++ Training model from scratch +++")
         tensorf = eval(args.model_name)(aabb, reso_cur, device, audio_dimension=args.audio_dimension, window_size=args.window_size,
                     density_n_comp=n_lamb_sigma, appearance_n_comp=n_lamb_sh, app_dim=args.data_dim_color, near_far=near_far,
                     shadingMode=args.shadingMode, alphaMask_thres=args.alpha_mask_thre, density_shift=args.density_shift, distance_scale=args.distance_scale,
@@ -185,6 +185,16 @@ def reconstruction(args):
     optimizer = torch.optim.Adam(grad_vars, betas=(0.9,0.99))
     optimizer_audio = torch.optim.Adam(params=list(audio_network.parameters()), lr=args.lr_basis, betas=(0.9, 0.999))
     optimizer_audio_attention = torch.optim.Adam(params=list(audio_attention_network.parameters()), lr=args.lr_basis, betas=(0.9, 0.999))
+
+    if args.ckpt is not None:
+        assert args.audio_checkpoint is not None, "Audio network checkpoint is None"
+        assert args.audio_attention_checkpoint is not None, "Audio attention network checkpoint is None"
+        ckpt = torch.load(args.ckpt, map_location=device)
+        optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+        ckpt = torch.load(args.audio_checkpoint, map_location=device)
+        optimizer_audio.load_state_dict(ckpt['optimizer_state_dict'])
+        ckpt = torch.load(args.audio_attention_checkpoint, map_location=device)
+        optimizer_audio_attention.load_state_dict(ckpt['optimizer_state_dict'])
 
     #linear in logrithmic space
     N_voxel_list = (torch.round(torch.exp(torch.linspace(np.log(args.N_voxel_init), np.log(args.N_voxel_final), len(upsamp_list)+1))).long()).tolist()[1:]
@@ -298,9 +308,9 @@ def reconstruction(args):
             summary_writer.add_scalar('test/psnr', np.mean(PSNRs_test), global_step=iteration)
 
         if iteration % args.save_every == args.save_every - 1:
-            tensorf.save(f'{logfolder}/{args.expname}_{iteration}.th')
-            audio_network.save(f'{logfolder}/{args.expname}_{iteration}_audio.th')
-            audio_attention_network.save(f'{logfolder}/{args.expname}_{iteration}_audio_attention.th')
+            tensorf.save(f'{logfolder}/{args.expname}_{iteration}.th', optimizer.state_dict(), iteration)
+            audio_network.save(f'{logfolder}/{args.expname}_{iteration}_audio.th', optimizer_audio.state_dict())
+            audio_attention_network.save(f'{logfolder}/{args.expname}_{iteration}_audio_attention.th', optimizer_audio_attention.state_dict())
 
         if iteration in update_AlphaMask_list:
 

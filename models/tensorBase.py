@@ -245,9 +245,14 @@ class TensorBase(torch.nn.Module):
             'featureC': self.featureC
         }
 
-    def save(self, path):
+    def save(self, path, optimizer_state, iteration=None):
         kwargs = self.get_kwargs()
-        ckpt = {'kwargs': kwargs, 'state_dict': self.state_dict()}
+        ckpt = {
+            'iteration': iteration,
+            'kwargs': kwargs, 
+            'state_dict': self.state_dict(),
+            'optimizer_state': optimizer_state
+        }
         if self.alphaMask is not None:
             alpha_volume = self.alphaMask.alpha_volume.bool().cpu().numpy()
             ckpt.update({'alphaMask.shape':alpha_volume.shape})
