@@ -143,7 +143,7 @@ def reconstruction(args):
     aabb = train_dataset.scene_bbox.to(device)
     reso_cur = N_to_reso(args.N_voxel_init, aabb)
     nSamples = min(args.nSamples, cal_n_samples(reso_cur,args.step_ratio))
-
+    start_iteration = 0
 
     if args.ckpt is not None:
         print(f"!!! Loading checkpoints from: !!! \n\t[TENSORF CKPT]{args.ckpt}\n\t[AUDIO CKPT]{args.audio_checkpoint}\n\t[AUDIO ATTN CKPT]{args.audio_attention_checkpoint}")
@@ -156,6 +156,8 @@ def reconstruction(args):
         
         tensorf = eval(args.model_name)(**kwargs)
         tensorf.load(ckpt)
+
+        start_iteration = ckpt['iteration'] if ckpt['iteration'] else start_iteration
 
         ckpt = torch.load(args.audio_checkpoint, map_location=device)
         audio_network = AudioNet(args.audio_dimension, args.window_size).to(device)
@@ -218,7 +220,7 @@ def reconstruction(args):
     print(f"initial TV_weight density: {TV_weight_density} appearance: {TV_weight_app}")
 
 
-    pbar = tqdm(range(args.n_iters), miniters=args.progress_refresh_rate, file=sys.stdout)
+    pbar = tqdm(range(start_iteration, args.n_iters), miniters=args.progress_refresh_rate, file=sys.stdout)
     for iteration in pbar:
 
         # ray_idx = trainingSampler.nextids()
