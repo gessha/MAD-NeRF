@@ -219,7 +219,7 @@ class TanksTempleDataset(Dataset):
 
 class TanksTempleDataset_AUDIO(Dataset):
     """NSVF Generic Dataset."""
-    def __init__(self, datadir, split='train', downsample=1.0, wh=[450,450], is_stack=False, nearfar=None, seed=1337, adnerf=True, testskip=1, per_image_loading=True, ray_sample_rate=4096, frame_face_mouth_sampling_ratios=[1.00, 0.00, 0.00], smo_size=8, evaluation_mode=False, ndc_space=False):
+    def __init__(self, datadir, split='train', downsample=1.0, wh=[450,450], is_stack=False, nearfar=None, seed=1337, adnerf=True, testskip=1, per_image_loading=True, ray_sample_rate=4096, frame_face_mouth_sampling_ratios=[1.00, 0.00, 0.00], smo_size=8, evaluation_mode=False):
         self.root_dir = datadir
         self.split = split
         self.is_stack = is_stack
@@ -233,7 +233,6 @@ class TanksTempleDataset_AUDIO(Dataset):
         self.frame_face_mouth_sampling_ratios = frame_face_mouth_sampling_ratios
         self.smo_size = smo_size
         self.evaluation = evaluation_mode
-        self.ndc = ndc_space
         random.seed(seed)
         
         self.white_bg = True
