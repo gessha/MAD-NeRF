@@ -655,7 +655,7 @@ class AD_TensorVMSplit(TensorVMSplit):
     # def compute_audio_feature(self, audio_tensor):
         # return self.audio_net(audio_tensor)     
 
-    def forward(self, rays_chunk, audio_features, white_bg=True, is_train=False, ndc_ray=False, N_samples=-1):
+    def forward(self, rays_chunk, audio_features, bc_chunk, white_bg=True, is_train=False, ndc_ray=False, N_samples=-1, face_mask=None):
 
         # sample points
         viewdirs = rays_chunk[:, 3:6]
@@ -668,6 +668,7 @@ class AD_TensorVMSplit(TensorVMSplit):
         else:
             xyz_sampled, z_vals, ray_valid = self.sample_ray(rays_chunk[:, :3], viewdirs, is_train=is_train,N_samples=N_samples)
             dists = torch.cat((z_vals[:, 1:] - z_vals[:, :-1], torch.zeros_like(z_vals[:, :1])), dim=-1)
+            # dists = dists * torch.norm(viewdirs[..., None, :], dim=-1) # EXPERIMENTAL, REMOVE AFTER NEXT EXPERIMENT
         viewdirs = viewdirs.view(-1, 1, 3).expand(xyz_sampled.shape)
         
         if self.alphaMask is not None:
@@ -687,6 +688,18 @@ class AD_TensorVMSplit(TensorVMSplit):
             validsigma = self.feature2density(sigma_feature)
             sigma[ray_valid] = validsigma
 
+        # if face mask is provided, set the density along the ray to 0 and the background (last sample along the ray to 1)
+        # print(f"Executing sigma change: {sigma.shape}, face_mask is: {face_mask.shape}, IF statement value {not isinstance(face_mask, type(None))}")
+        if not isinstance(face_mask, type(None)):
+            # print("Executing stuff")
+            for i, (ray_sigma, ray_state) in enumerate(zip(sigma, face_mask)): # for each ray in the batch
+                if ray_state == 0:
+                    # print("Setting signa to 0")
+                    # sigma[i, :] = 0
+                    # sigma[i, -1] = 1 # did not work
+                    # sigma[i, -2] = 100 # did not work
+                    pass
+        # sigma = sigma * 0
 
         alpha, weight, bg_weight = raw2alpha(sigma, dists * self.distance_scale)
 
@@ -704,13 +717,29 @@ class AD_TensorVMSplit(TensorVMSplit):
             composite_features = torch.cat([app_features, audio_features], dim=1)
             valid_rgbs = self.renderModule(xyz_sampled[app_mask], viewdirs[app_mask], composite_features)
             rgb[app_mask] = valid_rgbs
-
+            # print(rgb.shape, bc_chunk.shape)
+            rgb = torch.cat((rgb[:, :-1, :], bc_chunk.unsqueeze(1)), dim=1) # add the background rgbs
+            # [8096. 440, 3]
+            # 8096, 3
         acc_map = torch.sum(weight, -1)
+
+        # if it's background ray
+        if not isinstance(face_mask, type(None)):
+            # print("Executing stuff")
+            for i, (ray_sigma, ray_state) in enumerate(zip(sigma, face_mask)): # for each ray in the batch
+                if ray_state == 0:
+                    # print("Setting signa to 0")
+                    # sigma[i, :] = 0
+                    # sigma[i, -1] = 1 # did not work
+                    # sigma[i, -2] = 100 # did not work
+                    # weight[i, :] = 0
+                    # weight[i, -1] = 1
+                    pass
+
         rgb_map = torch.sum(weight[..., None] * rgb, -2)
 
-        if white_bg or (is_train and torch.rand((1,))<0.5):
-            rgb_map = rgb_map + (1. - acc_map[..., None])
-
+        # if white_bg or (is_train and torch.rand((1,))<0.5):
+            # rgb_map = rgb_map + (1. - acc_map[..., None])
         
         rgb_map = rgb_map.clamp(0,1)
 
@@ -718,4 +747,6 @@ class AD_TensorVMSplit(TensorVMSplit):
             depth_map = torch.sum(weight * z_vals, -1)
             depth_map = depth_map + (1. - acc_map) * rays_chunk[..., -1]
 
-        return rgb_map, depth_map # rgb, sigma, alpha, weight, bg_weight
+        return rgb_map, depth_map
+        # return rgb, sigma, alpha, weight, bg_weight
+        # return rgb_map, sigma, alpha, weight, bg_weight
