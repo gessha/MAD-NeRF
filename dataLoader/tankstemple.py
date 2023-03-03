@@ -10,6 +10,68 @@ import random
 import json
 from pathlib import Path
 
+def average_poses(poses):
+    """
+    Calculate the average pose, which is then used to center all poses
+    using @center_poses. Its computation is as follows:
+    1. Compute the center: the average of pose centers.
+    2. Compute the z axis: the normalized average z axis.
+    3. Compute axis y': the average y axis.
+    4. Compute x' = y' cross product z, then normalize it as the x axis.
+    5. Compute the y axis: z cross product x.
+    Note that at step 3, we cannot directly use y' as y axis since it's
+    not necessarily orthogonal to z axis. We need to pass from x to y.
+    Inputs:
+        poses: (N_images, 3, 4)
+    Outputs:
+        pose_avg: (3, 4) the average pose
+    """
+    # 1. Compute the center
+    center = poses[..., 3].mean(0)  # (3)
+
+    # 2. Compute the z axis
+    z = normalize(poses[..., 2].mean(0))  # (3)
+
+    # 3. Compute axis y' (no need to normalize as it's not the final output)
+    y_ = poses[..., 1].mean(0)  # (3)
+
+    # 4. Compute the x axis
+    x = normalize(np.cross(z, y_))  # (3)
+
+    # 5. Compute the y axis (as z and x are normalized, y is already of norm 1)
+    y = np.cross(x, z)  # (3)
+
+    pose_avg = np.stack([x, y, z, center], 1)  # (3, 4)
+
+    return pose_avg
+
+
+def center_poses(poses, blender2opencv):
+    """
+    Center the poses so that we can use NDC.
+    See https://github.com/bmild/nerf/issues/34
+    Inputs:
+        poses: (N_images, 3, 4)
+    Outputs:
+        poses_centered: (N_images, 3, 4) the centered poses
+        pose_avg: (3, 4) the average pose
+    """
+    poses = poses @ blender2opencv
+    pose_avg = average_poses(poses)  # (3, 4)
+    pose_avg_homo = np.eye(4)
+    pose_avg_homo[:3] = pose_avg  # convert to homogeneous coordinate for faster computation
+    pose_avg_homo = pose_avg_homo
+    # by simply adding 0, 0, 0, 1 as the last row
+    last_row = np.tile(np.array([0, 0, 0, 1]), (len(poses), 1, 1))  # (N_images, 1, 4)
+    poses_homo = \
+        np.concatenate([poses, last_row], 1)  # (N_images, 4, 4) homogeneous coordinate
+
+    poses_centered = np.linalg.inv(pose_avg_homo) @ poses_homo  # (N_images, 4, 4)
+    #     poses_centered = poses_centered  @ blender2opencv
+    poses_centered = poses_centered[:, :3]  # (N_images, 3, 4)
+
+    return poses_centered, pose_avg_homo
+
 def circle(radius=3.5, h=0.0, axis='z', t0=0, r=1):
     if axis == 'z':
         return lambda t: [radius * np.cos(r * t + t0), radius * np.sin(r * t + t0), h]
@@ -85,141 +147,9 @@ def gen_path(pos_gen, at=(0, 0, 0), up=(0, -1, 0), frames=180):
         c2ws.append(c2w)
     return torch.stack(c2ws)
 
-class TanksTempleDataset(Dataset):
-    """NSVF Generic Dataset."""
-    def __init__(self, datadir, split='train', downsample=1.0, wh=[1920,1080], is_stack=False):
-        self.root_dir = datadir
-        self.split = split
-        self.is_stack = is_stack
-        self.downsample = downsample
-        self.img_wh = (int(wh[0]/downsample),int(wh[1]/downsample))
-        self.define_transforms()
-
-        self.white_bg = True
-        self.near_far = [0.01,6.0]
-        self.scene_bbox = torch.from_numpy(np.loadtxt(f'{self.root_dir}/bbox.txt')).float()[:6].view(2,3)*1.2
-
-        self.blender2opencv = np.array([[1, 0, 0, 0], [0, -1, 0, 0], [0, 0, -1, 0], [0, 0, 0, 1]])
-        self.read_meta()
-        self.define_proj_mat()
-        
-        self.center = torch.mean(self.scene_bbox, axis=0).float().view(1, 1, 3)
-        self.radius = (self.scene_bbox[1] - self.center).float().view(1, 1, 3)
-    
-    def bbox2corners(self):
-        corners = self.scene_bbox.unsqueeze(0).repeat(4,1,1)
-        for i in range(3):
-            corners[i,[0,1],i] = corners[i,[1,0],i] 
-        return corners.view(-1,3)
-        
-        
-    def read_meta(self):
-
-        self.intrinsics = np.loadtxt(os.path.join(self.root_dir, "intrinsics.txt"))
-        self.intrinsics[:2] *= (np.array(self.img_wh)/np.array([1920,1080])).reshape(2,1)
-        pose_files = sorted(os.listdir(os.path.join(self.root_dir, 'pose')))
-        img_files  = sorted(os.listdir(os.path.join(self.root_dir, 'rgb')))
-
-        if self.split == 'train':
-            pose_files = [x for x in pose_files if x.startswith('0_')]
-            img_files = [x for x in img_files if x.startswith('0_')]
-        elif self.split == 'val':
-            pose_files = [x for x in pose_files if x.startswith('1_')]
-            img_files = [x for x in img_files if x.startswith('1_')]
-        elif self.split == 'test':
-            test_pose_files = [x for x in pose_files if x.startswith('2_')]
-            test_img_files = [x for x in img_files if x.startswith('2_')]
-            if len(test_pose_files) == 0:
-                test_pose_files = [x for x in pose_files if x.startswith('1_')]
-                test_img_files = [x for x in img_files if x.startswith('1_')]
-            pose_files = test_pose_files
-            img_files = test_img_files
-
-        # ray directions for all pixels, same for all images (same H, W, focal)
-        self.directions = get_ray_directions(self.img_wh[1], self.img_wh[0], [self.intrinsics[0,0],self.intrinsics[1,1]], center=self.intrinsics[:2,2])  # (h, w, 3)
-        self.directions = self.directions / torch.norm(self.directions, dim=-1, keepdim=True)
-
-
-        
-        self.poses = []
-        self.all_rays = []
-        self.all_rgbs = []
-
-        assert len(img_files) == len(pose_files)
-        for img_fname, pose_fname in tqdm(zip(img_files, pose_files), desc=f'Loading data {self.split} ({len(img_files)})'):
-            image_path = os.path.join(self.root_dir, 'rgb', img_fname)
-            img = Image.open(image_path)
-            if self.downsample!=1.0:
-                img = img.resize(self.img_wh, Image.LANCZOS)
-            img = self.transform(img)  # (4, h, w)
-            img = img.view(img.shape[0], -1).permute(1, 0)  # (h*w, 4) RGBA
-            if img.shape[-1]==4:
-                img = img[:, :3] * img[:, -1:] + (1 - img[:, -1:])  # blend A to RGB
-            self.all_rgbs.append(img)
-            
-
-            c2w = np.loadtxt(os.path.join(self.root_dir, 'pose', pose_fname))# @ cam_trans
-            c2w = torch.FloatTensor(c2w)
-            self.poses.append(c2w)  # C2W
-            rays_o, rays_d = get_rays(self.directions, c2w)  # both (h*w, 3)
-            self.all_rays += [torch.cat([rays_o, rays_d], 1)]  # (h*w, 8)
-
-        self.poses = torch.stack(self.poses)
-
-        center = torch.mean(self.scene_bbox, dim=0)
-        radius = torch.norm(self.scene_bbox[1]-center)*1.2
-        up = torch.mean(self.poses[:, :3, 1], dim=0).tolist()
-        pos_gen = circle(radius=radius, h=-0.2*up[1], axis='y')
-        self.render_path = gen_path(pos_gen, up=up,frames=200)
-        self.render_path[:, :3, 3] += center
-
-
-
-        if 'train' == self.split:
-            if self.is_stack:
-                self.all_rays = torch.stack(self.all_rays, 0).reshape(-1,*self.img_wh[::-1], 6)  # (len(self.meta['frames])*h*w, 3)
-                self.all_rgbs = torch.stack(self.all_rgbs, 0).reshape(-1,*self.img_wh[::-1], 3)  # (len(self.meta['frames])*h*w, 3) 
-            else:
-                self.all_rays = torch.cat(self.all_rays, 0)  # (len(self.meta['frames])*h*w, 3)
-                self.all_rgbs = torch.cat(self.all_rgbs, 0)  # (len(self.meta['frames])*h*w, 3)
-        else:
-            self.all_rays = torch.stack(self.all_rays, 0)  # (len(self.meta['frames]),h*w, 3)
-            self.all_rgbs = torch.stack(self.all_rgbs, 0).reshape(-1,*self.img_wh[::-1], 3)  # (len(self.meta['frames]),h,w,3)
-
- 
-    def define_transforms(self):
-        self.transform = T.ToTensor()
-        
-    def define_proj_mat(self):
-        self.proj_mat = torch.from_numpy(self.intrinsics[:3,:3]).unsqueeze(0).float() @ torch.inverse(self.poses)[:,:3]
-
-    def world2ndc(self, points):
-        device = points.device
-        return (points - self.center.to(device)) / self.radius.to(device)
-        
-    def __len__(self):
-        if self.split == 'train':
-            return len(self.all_rays)
-        return len(self.all_rgbs)
-
-    def __getitem__(self, idx):
-
-        if self.split == 'train':  # use data in the buffers
-            sample = {'rays': self.all_rays[idx],
-                      'rgbs': self.all_rgbs[idx]}
-
-        else:  # create data for each image separately
-
-            img = self.all_rgbs[idx]
-            rays = self.all_rays[idx]
-
-            sample = {'rays': rays,
-                      'rgbs': img}
-        return sample
-
 class TanksTempleDataset_AUDIO(Dataset):
     """NSVF Generic Dataset."""
-    def __init__(self, datadir, split='train', downsample=1.0, wh=[450,450], is_stack=False, nearfar=None, seed=1337, adnerf=True, testskip=1, per_image_loading=True, ray_sample_rate=4096, frame_face_mouth_sampling_ratios=[1.00, 0.00, 0.00], smo_size=8, evaluation_mode=False):
+    def __init__(self, datadir, split='train', downsample=1.0, wh=[450,450], is_stack=False, nearfar=None, seed=1337, adnerf=True, testskip=1, per_image_loading=True, ray_sample_rate=4096, frame_face_mouth_sampling_ratios=[1.00, 0.00, 0.00], smo_size=8, evaluation_mode=False, is_ndc=False):
         self.root_dir = datadir
         self.split = split
         self.is_stack = is_stack
@@ -233,24 +163,30 @@ class TanksTempleDataset_AUDIO(Dataset):
         self.frame_face_mouth_sampling_ratios = frame_face_mouth_sampling_ratios
         self.smo_size = smo_size
         self.evaluation = evaluation_mode
+        self.is_ndc = is_ndc
         random.seed(seed)
         
-        self.white_bg = True
+        self.white_bg = False # used in LLFF dataset
+        
         if nearfar:
             self.near_far = nearfar
         else:
             self.near_far = [0.01,6.0]
+
         self.scene_bbox = torch.from_numpy(np.loadtxt(f'{self.root_dir}/bbox.txt')).float()[:6].view(2,3) # *1.2 # COMMENTED OUT, DONE IN REGULAR TANKS TEMPLE DATASET
-        self.blender2opencv = np.array([[1, 0, 0, 0], [0, -1, 0, 0], [0, 0, -1, 0], [0, 0, 0, 1]])
+        self.blender2opencv = np.eye(4) # np.array([[1, 0, 0, 0], [0, -1, 0, 0], [0, 0, -1, 0], [0, 0, 0, 1]])
         
-        if self.adnerf:
-            self.read_meta_ADNERF()
-        else:
-            self.read_meta()
+        self.read_meta_ADNERF()
         self.define_proj_mat()
+        
+        if self.is_ndc:
+            self.scene_bbox[0, 2] = -1.0
+            self.scene_bbox[1, 2] = +1.0
+            self.near_far = [0.0, 1.0]
         
         self.center = torch.mean(self.scene_bbox, axis=0).float().view(1, 1, 3)
         self.radius = (self.scene_bbox[1] - self.center).float().view(1, 1, 3)
+        self.invradius = 1.0 / (self.scene_bbox[1] - self.center).float().view(1, 1, 3)
     
     def bbox2corners(self):
         corners = self.scene_bbox.unsqueeze(0).repeat(4,1,1)
@@ -274,6 +210,8 @@ class TanksTempleDataset_AUDIO(Dataset):
             else:
                 data = json.loads((Path(self.root_dir) / "transforms_val_extended_eval.json").read_text())
         
+        self.img_wh = Image.open(Path(self.root_dir) / "ori_imgs" / "0.jpg").size
+
         aud_features = np.load(Path(self.root_dir) / 'aud.npy')
         
         self.intrinsics = np.zeros((4,4))
@@ -287,7 +225,8 @@ class TanksTempleDataset_AUDIO(Dataset):
          # ray directions for all pixels, same for all images (same H, W, focal)
         self.directions = get_ray_directions(self.img_wh[1], self.img_wh[0], [self.intrinsics[0,0],self.intrinsics[1,1]], center=self.intrinsics[:2,2])  # (h, w, 3)
         self.directions = self.directions / torch.norm(self.directions, dim=-1, keepdim=True)
-        
+        if self.is_ndc:
+            self.directions = get_ray_directions_blender(self.img_wh[1], self.img_wh[0], [self.intrinsics[0,0],self.intrinsics[1,1]])  # (h, w, 3)
         # img_files = sorted((Path(self.root_dir) / "head_imgs").glob("*.jpg"))
         # assert len(img_files) == len(data['frames']), f"{len(img_files)} != {len(data['frames'])}"
         
@@ -323,8 +262,8 @@ class TanksTempleDataset_AUDIO(Dataset):
             # print("Loaded pose")
             
             # add the rays
-            rays_o, rays_d = get_rays(self.directions, c2w)  # both (h*w, 3)
-            self.all_rays += [torch.cat([rays_o, rays_d], 1)]  # (h*w, 8)
+            # rays_o, rays_d = get_rays(self.directions, c2w)  # both (h*w, 3)
+            # self.all_rays += [torch.cat([rays_o, rays_d], 1)]  # (h*w, 8)
             # print("Loaded rays")
             
             # add audio
@@ -333,6 +272,36 @@ class TanksTempleDataset_AUDIO(Dataset):
 
             self.all_face_rects.append(np.array(frame['face_rect'], dtype=np.int32))
             self.all_mouth_rects.append(np.array(frame['mouth_rect'], dtype=np.int32))
+        
+        # load background image
+        background_image_path = Path(self.root_dir) / f"bc.jpg"
+        background_image = Image.open(background_image_path)
+        self.background_image = self.transform(background_image)
+        self.background_image = self.background_image.permute([1, 2, 0])
+
+        if self.is_ndc:
+            # Step 1: rescale focal length according to training resolution
+            H, W, self.focal = self.img_wh[0], self.img_wh[1], self.intrinsics[0, 0]
+            self.focal = [self.focal * self.img_wh[0] / W, self.focal * self.img_wh[1] / H]
+
+            # Step 2: correct poses
+            # Original poses has rotation in form "down right back", change to "right up back"
+            # See https://github.com/bmild/nerf/issues/34
+            self.poses, self.pose_avg = center_poses(self.poses, self.blender2opencv)
+
+            # Step 3: correct scale so that the nearest depth is at a little more than 1.0
+            near_original = self.near_fars.min()
+            scale_factor = near_original * 0.75
+            self.near_fars /= scale_factor
+            self.poses[..., 3] /= scale_factor
+
+        for c2w in self.poses:    
+            # add the rays
+            rays_o, rays_d = get_rays(self.directions, c2w)  # both (h*w, 3)
+            if self.is_ndc:
+                rays_o, rays_d = ndc_rays_blender(self.img_wh[1], self.img_wh[0], self.intrinsics[0,0], 1.0, rays_o, rays_d)
+            self.all_rays += [torch.cat([rays_o, rays_d], 1)]  # (h*w, 8)
+            # print("Loaded rays")
 
         self.rays_per_image = len(rays_o)
         self.poses = torch.stack(self.poses)
@@ -469,6 +438,9 @@ class TanksTempleDataset_AUDIO(Dataset):
                     batch_rays = torch.concatenate([mouth_rays, face_rays, frame_rays])
                     batch_rgbs = torch.concatenate([mouth_rgbs, face_rgbs, frame_rgbs])
 
+                    background_coords = torch.cat([mouth_rays_coords, face_rays_coords, frame_rays_coords])
+                    background_rgbs = rgbs[background_coords[:, 0], background_coords[:, 1]]
+
                 else:
                     # print("NOT face_rate != 0 or mouth_rate != 0:")
                     indeces = random.sample(range(rays.shape[0]), self.ray_sample_rate)
@@ -478,10 +450,13 @@ class TanksTempleDataset_AUDIO(Dataset):
                     batch_rgbs = img.reshape(rays.shape[0], 3)
                     batch_rgbs = torch.index_select(batch_rgbs, 0, indeces)
 
+                    background_rgbs = torch.index_select(self.background_image, 0, indeces)
+
                 sample = {
                     'index': index,
                     'rays': batch_rays,
                     "rgbs": batch_rgbs,
+                    "bc-rgb": background_rgbs,
                     "auds": auds,
                     "auds-win": auds_win,
                     "face-rect": face_rect,
@@ -498,6 +473,7 @@ class TanksTempleDataset_AUDIO(Dataset):
                     'rays': rays,
                     'rgbs': img,
                     'auds': auds,
+                    'bc-rgb': self.background_image.reshape(-1, 3)
                     # "face-rect": rect, # not needed during testing
                 }
                 return sample
@@ -507,12 +483,16 @@ class TanksTempleDataset_AUDIO(Dataset):
             rays = self.all_rays[idx]
             img = self.all_rgbs[idx]
             auds = self.auds[idx].float()
-            # rect = self.all_face_rects[idx] not needed during testing
-
+            face_rect = self.all_face_rects[idx] # not needed during testing
+            mouth_rect = self.all_mouth_rects[idx]
             sample = {
+                'index': idx,
                 'rays': rays,
                 'rgbs': img,
                 'auds': auds,
-                # "face-rect": rect, # not needed during testing
+                'bc-rgb': self.background_image.reshape(-1, 3),
+                "face-rect": face_rect, # not needed during testing
+                "mouth-rect": mouth_rect,
+                "auds-win": None
             }
         return sample
