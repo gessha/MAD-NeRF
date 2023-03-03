@@ -32,6 +32,8 @@ def config_parser(cmd=None):
                         choices=['blender', 'llff', 'nsvf', 'dtu','tankstemple', 'ad_nerf', 'own_data'])
     parser.add_argument('--frame_face_mouth_sampling_ratios', type=float, action="append",
     help="Ratios about where to sample rays [FRAME_SAMPLE, FACE_SAMPLE, MOUTH_SAMPLE] Ex: [1.00, 0.00, 0.00] to sample from the whole frame, [0.05, 0.95, 0.00] to sample from the face box")
+    parser.add_argument('--multiple_identities', type=int, default=0, help="mode for training with multiple identities")
+    parser.add_argument('--identities', type=str, action="append", default=[], help="Identity folders for training under multiple identities")
 
     # training options
     # learning rate
