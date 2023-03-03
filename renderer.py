@@ -5,17 +5,27 @@ from models.tensoRF import TensorVM, TensorCP, raw2alpha, TensorVMSplit, AlphaGr
 from utils import *
 from dataLoader.ray_utils import ndc_rays_blender
 
-def OctreeRender_trilinear_fast_AUDIO(rays, audio_inputs, tensorf, chunk=4096, N_samples=-1, ndc_ray=False, white_bg=True, is_train=False, device='cuda'):
+def OctreeRender_trilinear_fast_AUDIO(rays, audio_inputs, bc_rgb, tensorf, chunk=4096, N_samples=-1, ndc_ray=False, white_bg=True, is_train=False, device='cuda', face_mask=None):
 
-    rgbs, alphas, depth_maps, weights, uncertainties = [], [], [], [], []
+    rgbs, sigmas, alphas, weights, uncertainties = [], [], [], [], []
+    depth_maps = []
     N_rays_all = rays.shape[0]
     for chunk_idx in range(N_rays_all // chunk + int(N_rays_all % chunk > 0)):
         rays_chunk = rays[chunk_idx * chunk:(chunk_idx + 1) * chunk].to(device)
-        rgb_map, depth_map = tensorf(rays_chunk, audio_inputs, is_train=is_train, white_bg=white_bg, ndc_ray=ndc_ray, N_samples=N_samples)
+        bc_chunk = bc_rgb[chunk_idx * chunk:(chunk_idx + 1) * chunk].to(device)
+        if not isinstance(face_mask, type(None)):
+            face_mask_chunk = face_mask[chunk_idx * chunk:(chunk_idx + 1) * chunk].to(device)
+        # rgb_map, sigma_map, alpha_map, weight_map, bg_weight_map = tensorf(rays_chunk, audio_inputs, bc_chunk, is_train=is_train, white_bg=white_bg, ndc_ray=ndc_ray, N_samples=N_samples, face_mask=face_mask_chunk if not isinstance(face_mask, type(None)) else None)
+        rgb_map, depth_map = tensorf(rays_chunk, audio_inputs, bc_chunk, is_train=is_train, white_bg=white_bg, ndc_ray=ndc_ray, N_samples=N_samples, face_mask=face_mask_chunk if not isinstance(face_mask, type(None)) else None)
+        
         rgbs.append(rgb_map)
+        # sigmas.append(sigma_map)
+        # alphas.append(alpha_map)
+        # weights.append(weight_map)
+        # uncertainties.append(bg_weight_map)
         depth_maps.append(depth_map)
         # print(chunk_idx, rays_chunk.shape, rgb_map.shape, depth_map.shape, len(rgbs), len(depth_maps))
-
+    # return torch.cat(rgbs), torch.cat(sigmas), torch.cat(alphas), torch.cat(weights), torch.cat(uncertainties)
     return torch.cat(rgbs), None, torch.cat(depth_maps), None, None
 
 def OctreeRender_trilinear_fast(rays, tensorf, chunk=4096, N_samples=-1, ndc_ray=False, white_bg=True, is_train=False, device='cuda'):
@@ -55,9 +65,10 @@ def evaluation(test_dataset, tensorf, audio_network, args, renderer, savePath=No
         rays = dataset_item['rays'].to(device)
         gt_rgb = dataset_item['rgbs']
         auds = dataset_item['auds'].to(device)
+        bc_rgbs = dataset_item['bc-rgb'].to(device)
         audio_features = audio_network(auds)
         # print(tensorf.aabb.device, rays.device, auds.device)
-        rgb_map, _, depth_map, _, _ = renderer(rays, audio_features, tensorf, chunk=4096, N_samples=N_samples,
+        rgb_map, _, depth_map, _, _ = renderer(rays, audio_features, bc_rgbs, tensorf, chunk=4096, N_samples=N_samples,
                                         ndc_ray=ndc_ray, white_bg = white_bg, device=device)
         rgb_map = rgb_map.clamp(0.0, 1.0)
 
