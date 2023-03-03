@@ -228,7 +228,11 @@ def reconstruction(args):
         dataset_item = train_dataset[iteration]
 
         # rays_train, rgb_train, aud_train = train_dataset[dataset_index]
-        rays_train, rgb_train, audio_train, audio_window = dataset_item['rays'].to(device), dataset_item['rgbs'].to(device), dataset_item['auds'].to(device), dataset_item['auds-win'].to(device)
+        rays_train = dataset_item['rays'].to(device)
+        rgb_train = dataset_item['rgbs'].to(device)
+        audio_train = dataset_item['auds'].to(device)
+        audio_window = dataset_item['auds-win'].to(device)
+        bc_rgbs = dataset_item['bc-rgb'].to(device)
         # rays_train, rgb_train = allrays[ray_idx], allrgbs[ray_idx].to(device)
 
 
@@ -242,7 +246,7 @@ def reconstruction(args):
 
         # print(audio_features.shape)
         #rgb_map, alphas_map, depth_map, weights, uncertainty
-        rgb_map, alphas_map, depth_map, weights, uncertainty = renderer(rays_train, audio_features, tensorf, chunk=args.batch_size,
+        rgb_map, alphas_map, depth_map, weights, uncertainty = renderer(rays_train, audio_features, bc_rgbs, tensorf, chunk=args.batch_size,
                                 N_samples=nSamples, white_bg = white_bg, ndc_ray=ndc_ray, device=device, is_train=True)
 
         loss = torch.mean((rgb_map - rgb_train) ** 2)
@@ -278,7 +282,7 @@ def reconstruction(args):
         audio_network_gradient_norm = accumulate_gradient_norm(audio_network)
         summary_writer.add_scalar('train/audio_net_norm', audio_network_gradient_norm, global_step=iteration)
         audio_attention_network_gradient_norm = accumulate_gradient_norm(audio_attention_network)
-        summary_writer.add_scalar('train/audio_net_norm', audio_attention_network_gradient_norm, global_step=iteration)
+        summary_writer.add_scalar('train/audio_attnetion_net_norm', audio_attention_network_gradient_norm, global_step=iteration)
         
         optimizer.step()
         optimizer_audio.step()
